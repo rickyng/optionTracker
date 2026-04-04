@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: ibkr-options-analyzer
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    envVars:
+      - key: PORT
+        sync: false
+      - key: IBKR_DB_URL
+        sync: false
+      - key: IBKR_DB_AUTH_TOKEN
+        sync: false
+      - key: IBKR_LOG_LEVEL
+        value: INFO
+      - key: IBKR_HTTP_TIMEOUT
+        value: 30
+      - key: ALPHAVANTAGE_API_KEY
+        sync: false
+      - key: IBKR_GOOGLE_CLIENT_ID
+        sync: false
+      - key: IBKR_GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: IBKR_OAUTH_REDIRECT_URL
+        sync: false
+      - key: IBKR_SESSION_SECRET
+        sync: false
+      - key: IBKR_ALLOWED_EMAILS
+        sync: false
+
+    healthCheckPath: /health

@@ -1,0 +1,10 @@
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+ignore = ["B008", "E402"]  # B008: Depends() in defaults; E402: late imports for Dash mounting
+
+[lint.per-file-ignores]
+"tests/**" = ["E501"]
+"app/dashboard/**" = ["E501"]

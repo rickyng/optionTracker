@@ -1,0 +1,223 @@
+import math
+from collections import defaultdict
+
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_db, get_user_account_ids
+from app.schemas.position import Position
+from app.schemas.strategy import Strategy
+from app.services import position_service, strategy_service
+from app.services.price_service import fetch_prices_batch
+from app.utils.cache import dashboard_summary_cache, user_cache_key
+
+router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+def _sanitize(obj):
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, float) and math.isinf(obj):
+        return "unlimited" if obj > 0 else "-unlimited"
+    if isinstance(obj, set):
+        return list(obj)
+    return obj
+
+
+def _compute_summary(
+    positions: list[Position],
+    strategies: list[Strategy],
+    account_names: dict[int, str],
+    market_prices: dict[str, float | None],
+    risk_factor: float,
+) -> dict:
+    """Compute dashboard summary for a single risk margin percentage."""
+    underlying_exp: dict[str, dict] = defaultdict(
+        lambda: {
+            "est_profit": 0.0,
+            "est_loss": 0.0,
+            "call_loss": 0.0,
+            "put_loss": 0.0,
+            "has_calls": False,
+            "has_puts": False,
+            "market_price": None,
+            "positions": [],
+        }
+    )
+
+    for p in positions:
+        exp = underlying_exp[p.underlying]
+        mult = p.multiplier
+        qty = abs(p.quantity)
+        premium = p.entry_premium
+
+        pos_profit = qty * premium * mult
+        pos_loss = 0.0
+        margin_price = None
+        market_price = market_prices.get(p.underlying)
+        if market_price is not None:
+            if p.right == "P":
+                margin_price = round(market_price * (1 - risk_factor), 2)
+                loss_per_share = p.strike - margin_price
+            else:
+                margin_price = round(market_price * (1 + risk_factor), 2)
+                loss_per_share = margin_price - p.strike
+            pos_loss = max(0, loss_per_share) * mult * qty
+            exp["market_price"] = market_price
+
+        exp["est_profit"] += pos_profit
+
+        if p.right == "C":
+            exp["call_loss"] += pos_loss
+            exp["has_calls"] = True
+        else:
+            exp["put_loss"] += pos_loss
+            exp["has_puts"] = True
+
+        exp["positions"].append(
+            {
+                "account": account_names.get(p.account_id, str(p.account_id)),
+                "expiry": p.expiry,
+                "strike": p.strike,
+                "right": p.right,
+                "quantity": p.quantity,
+                "risk_margin_price": margin_price,
+                "est_profit": round(pos_profit, 2),
+                "est_loss": round(pos_loss, 2),
+            }
+        )
+
+    for exp_data in underlying_exp.values():
+        if exp_data["has_calls"] and exp_data["has_puts"]:
+            exp_data["est_loss"] = round(max(exp_data["call_loss"], exp_data["put_loss"]), 2)
+        else:
+            exp_data["est_loss"] = round(exp_data["call_loss"] + exp_data["put_loss"], 2)
+
+    total_premium = sum(
+        sum(leg.get("entry_premium", 0) * abs(leg.get("quantity", 0)) * leg.get("multiplier", 100) for leg in s.legs)
+        for s in strategies
+    )
+
+    return _sanitize(
+        {
+            "total_accounts": len(set(p.account_id for p in positions)) if positions else 0,
+            "total_positions": len(positions),
+            "total_strategies": len(strategies),
+            "total_est_profit": sum(e["est_profit"] for e in underlying_exp.values()),
+            "total_est_loss": sum(e["est_loss"] for e in underlying_exp.values()),
+            "total_net_premium": total_premium,
+            "underlying_exposure": dict(underlying_exp),
+        }
+    )
+
+
+async def _load_shared_data(
+    db: AsyncSession,
+    account_id: int | None,
+    user_account_ids: list[int] | None,
+) -> tuple[list[Position], list[Strategy], dict[int, str], dict[str, float | None]]:
+    """Load positions, strategies, account names, and market prices in one pass."""
+    positions = await position_service.list_positions(
+        db, account_id=account_id, user_account_ids=user_account_ids
+    )
+    strategies = await strategy_service.get_strategies(
+        db, account_id=account_id, positions=positions, user_account_ids=user_account_ids
+    )
+    # Account names are already populated from the JOIN in list_positions
+    account_names = {p.account_id: p.account_name for p in positions} if positions else {}
+    underlyings = list({p.underlying for p in positions})
+    market_prices = await fetch_prices_batch(underlyings) if underlyings else {}
+    return positions, strategies, account_names, market_prices
+
+
+@router.get("/summary")
+async def dashboard_summary(
+    request: Request,
+    account_id: int | None = Query(None),
+    risk_margin_pct: float = Query(30),
+    db: AsyncSession = Depends(get_db),
+):
+    user_account_ids = await get_user_account_ids(request, db)
+    user_key = user_cache_key(user_account_ids)
+    cache_key = ("summary", account_id, risk_margin_pct, user_key)
+    cached = dashboard_summary_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    positions, strategies, account_names, market_prices = await _load_shared_data(
+        db, account_id, user_account_ids
+    )
+    result = _compute_summary(positions, strategies, account_names, market_prices, risk_margin_pct / 100.0)
+    dashboard_summary_cache.set(cache_key, result)
+    return result
+
+
+@router.get("/accounts")
+async def dashboard_accounts(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    user_account_ids = await get_user_account_ids(request, db)
+    risk = await strategy_service.get_portfolio_risk(db, user_account_ids=user_account_ids)
+    return _sanitize({"accounts": [ar.model_dump() for ar in risk.account_risks]})
+
+
+@router.get("/summary-multi")
+async def dashboard_summary_multi(
+    request: Request,
+    account_id: int | None = Query(None),
+    pcts: str = Query("5,10,20"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compute summary for multiple risk margin percentages in one request.
+
+    Returns a dict keyed by percentage string, each value is the same shape
+    as /summary. Avoids N separate API calls from the risk tab.
+    """
+    user_account_ids = await get_user_account_ids(request, db)
+    user_key = user_cache_key(user_account_ids)
+
+    margin_pcts = [int(p.strip()) for p in pcts.split(",") if p.strip().isdigit()]
+    if not margin_pcts:
+        margin_pcts = [5, 10, 20]
+
+    # Serve whatever we have in cache, only compute missing
+    cache_keys = {pct: ("summary", account_id, pct, user_key) for pct in margin_pcts}
+    results: dict[str, object] = {}
+    missing_pcts = []
+    for pct in margin_pcts:
+        cached = dashboard_summary_cache.get(cache_keys[pct])
+        if cached is not None:
+            results[str(pct)] = cached
+        else:
+            missing_pcts.append(pct)
+
+    if not missing_pcts:
+        return results
+
+    # Fetch shared data once for all missing percentages
+    positions, strategies, account_names, market_prices = await _load_shared_data(
+        db, account_id, user_account_ids
+    )
+
+    for pct in missing_pcts:
+        result = _compute_summary(positions, strategies, account_names, market_prices, pct / 100.0)
+        dashboard_summary_cache.set(cache_keys[pct], result)
+        results[str(pct)] = result
+
+    return results
+
+
+@router.get("/underlyings")
+async def dashboard_underlyings(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    user_account_ids = await get_user_account_ids(request, db)
+    strategies = await strategy_service.get_strategies(db, user_account_ids=user_account_ids)
+    by_underlying: dict[str, list] = defaultdict(list)
+    for s in strategies:
+        by_underlying[s.underlying].append(_sanitize(s.model_dump()))
+    return dict(by_underlying)

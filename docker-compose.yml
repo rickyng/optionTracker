@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    container_name: ibkr-options-analyzer
+    ports:
+      - "8001:8001"
+    environment:
+      - IBKR_DB_PATH=/data/ibkr.db
+    volumes:
+      - db-data:/data
+
+volumes:
+  db-data:

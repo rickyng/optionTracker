@@ -1,0 +1,215 @@
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
+    background-color: #0f0f1a !important;
+}
+
+/* Tab styling */
+.nav-tabs .nav-link {
+    color: #8892b0 !important;
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    font-weight: 500;
+    padding: 0.6rem 1.1rem;
+    transition: all 0.2s ease;
+}
+.nav-tabs .nav-link:hover {
+    color: #64ffda !important;
+    border-bottom-color: rgba(100,255,218,0.3) !important;
+}
+.nav-tabs .nav-link.active {
+    color: #64ffda !important;
+    border-bottom: 2px solid #64ffda !important;
+    background: transparent !important;
+}
+
+/* Card styling */
+.card {
+    border: 1px solid #2a2a4a !important;
+    border-radius: 8px !important;
+    background-color: #1a1a2e !important;
+}
+.card-header {
+    background-color: #16213e !important;
+    border-bottom: 1px solid #2a2a4a !important;
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #8892b0 !important;
+    border-radius: 8px 8px 0 0 !important;
+}
+.card-body {
+    color: #e0e0e0 !important;
+}
+
+/* Dropdown styling */
+.Select-control, .Select-menu-outer {
+    background-color: #16213e !important;
+    border-color: #2a2a4a !important;
+    color: #e0e0e0 !important;
+}
+.Select-value-label {
+    color: #e0e0e0 !important;
+}
+.Select-arrow {
+    border-color: #8892b0 transparent transparent !important;
+}
+
+/* Slider styling */
+.rc-slider-track {
+    background-color: #64ffda !important;
+}
+.rc-slider-handle {
+    border-color: #64ffda !important;
+}
+
+/* DataTable styling */
+.dash-spreadsheet-container .dash-spreadsheet-inner th {
+    background-color: #16213e !important;
+    color: #8892b0 !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    font-size: 0.8rem !important;
+    letter-spacing: 0.03em !important;
+    border-bottom: 2px solid #2a2a4a !important;
+}
+.dash-spreadsheet-container .dash-spreadsheet-inner td {
+    background-color: #1a1a2e !important;
+    color: #e0e0e0 !important;
+}
+
+/* Stat card value */
+.stat-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+.stat-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #8892b0;
+}
+
+/* Subtle footer */
+.dash-footer {
+    text-align: center;
+    padding: 1rem 0;
+    color: #4a4a6a;
+    font-size: 0.75rem;
+    border-top: 1px solid #2a2a4a;
+    margin-top: 2rem;
+}
+
+/* ── Mobile responsive ────────────────────────────────────────────── */
+
+/* Tab bar: scroll horizontally instead of wrapping */
+.nav-tabs {
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+}
+.nav-tabs .nav-link {
+    white-space: nowrap;
+}
+
+/* Reduce chart bottom margin on small screens */
+@media (max-width: 576px) {
+    .card-body {
+        padding: 0.5rem !important;
+    }
+    .dash-footer {
+        margin-top: 1rem;
+    }
+}
+
+/* ── PWA & Mobile Polish ──────────────────────────────────────────── */
+
+/* Safe area insets for iPhone notch & home indicator */
+body {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Standalone mode: add top padding for status bar area */
+@media all and (display-mode: standalone) {
+    body {
+        padding-top: env(safe-area-inset-top, 20px);
+    }
+}
+
+/* Touch-friendly targets (min 44px per Apple HIG) */
+.btn, .nav-link, .dropdown-item, .form-control, .Select-control {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+}
+
+/* Prevent unwanted zoom on input focus (iOS) */
+input, select, textarea {
+    font-size: 16px !important; /* >= 16px prevents iOS auto-zoom */
+}
+
+/* Disable double-tap zoom, enable smooth touch — scoped to interactive elements */
+.btn, .nav-link, .dropdown-item, .form-control, .Select-control,
+input, select, textarea, .rc-slider-handle, .nav-tabs {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Smooth momentum scrolling */
+.container, .container-fluid,
+.tab-content, .dash-spreadsheet-container {
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Better Plotly chart interaction on mobile */
+.js-plotly-plot .plotly .modebar {
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+}
+
+/* Larger slider handle for touch */
+.rc-slider-handle {
+    width: 22px !important;
+    height: 22px !important;
+    margin-top: -9px !important;
+}
+
+/* Card tap feedback */
+.card {
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+.card:active {
+    transform: scale(0.99);
+}
+
+/* Ensure dark scrollbar matches theme */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: #0f0f1a;
+}
+::-webkit-scrollbar-thumb {
+    background: #2a2a4a;
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #3a3a5a;
+}
+
+/* Prevent pull-to-refresh in standalone mode */
+@media all and (display-mode: standalone) {
+    html, body {
+        overscroll-behavior-y: contain;
+    }
+}
+
