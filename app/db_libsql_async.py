@@ -59,11 +59,13 @@ class _AsyncConn:
                 await_only(asyncio.to_thread(self._conn.commit))
                 return
             except Exception as exc:
-                if _is_transient(exc) and attempt < 2:
-                    _logger.warning("Transient Turso error on commit, attempt %d/3: %s", attempt + 1, exc)
-                    self._reconnect()
-                else:
+                if not _is_transient(exc) or attempt >= 2:
                     raise
+                _logger.warning("Transient Turso error on commit, attempt %d/3: %s", attempt + 1, exc)
+                try:
+                    self._reconnect()
+                except Exception as recon_exc:
+                    _logger.warning("Reconnect failed on attempt %d: %s", attempt + 1, recon_exc)
 
     def _reconnect(self):
         """Replace the dead underlying connection with a fresh one."""
@@ -73,6 +75,8 @@ class _AsyncConn:
         database, kwargs = self._connect_args
         with contextlib.suppress(Exception):
             await_only(asyncio.to_thread(self._conn.close))
+        # Brief backoff before reconnecting to let Turso clean up the dead stream
+        await_only(asyncio.sleep(0.5))
         self._conn = await_only(asyncio.to_thread(_sync.connect, database, **kwargs))
         _logger.info("Reconnected to Turso after transient error")
 
@@ -81,7 +85,11 @@ class _AsyncConn:
             await_only(asyncio.to_thread(self._conn.rollback))
         except Exception as exc:
             if _is_transient(exc):
-                _logger.warning("Transient Turso error on rollback (ignored): %s", exc)
+                _logger.warning("Transient Turso error on rollback: %s", exc)
+                try:
+                    self._reconnect()
+                except Exception as recon_exc:
+                    _logger.warning("Reconnect failed after rollback error: %s", recon_exc)
             else:
                 raise
 
@@ -98,14 +106,30 @@ class _AsyncConn:
             self._conn.isolation_level = value
 
     def execute(self, sql, params=None):
-        cursor = self._conn.cursor()
-        await_only(asyncio.to_thread(cursor.execute, sql, params or ()))
-        return _AsyncCursor(cursor)
+        raw_cursor = self._conn.cursor()
+        try:
+            await_only(asyncio.to_thread(raw_cursor.execute, sql, params or ()))
+        except Exception as exc:
+            if not _is_transient(exc):
+                raise
+            _logger.warning("Transient Turso error on conn execute: %s", exc)
+            self._reconnect()
+            raw_cursor = self._conn.cursor()
+            await_only(asyncio.to_thread(raw_cursor.execute, sql, params or ()))
+        return _AsyncCursor(raw_cursor, conn=self)
 
     def executemany(self, sql, params_seq):
-        cursor = self._conn.cursor()
-        await_only(asyncio.to_thread(cursor.executemany, sql, params_seq))
-        return _AsyncCursor(cursor)
+        raw_cursor = self._conn.cursor()
+        try:
+            await_only(asyncio.to_thread(raw_cursor.executemany, sql, params_seq))
+        except Exception as exc:
+            if not _is_transient(exc):
+                raise
+            _logger.warning("Transient Turso error on conn executemany: %s", exc)
+            self._reconnect()
+            raw_cursor = self._conn.cursor()
+            await_only(asyncio.to_thread(raw_cursor.executemany, sql, params_seq))
+        return _AsyncCursor(raw_cursor, conn=self)
 
 
 class _AsyncCursor:
@@ -127,12 +151,31 @@ class _AsyncCursor:
     def lastrowid(self):
         return self._cursor.lastrowid
 
+    def _retry_cursor_op(self, op, *args):
+        """Run a cursor operation (execute/executemany) with transient retry."""
+        for attempt in range(3):
+            try:
+                await_only(asyncio.to_thread(getattr(self._cursor, op), *args))
+                return
+            except Exception as exc:
+                if not _is_transient(exc) or attempt >= 2:
+                    raise
+                _logger.warning("Transient Turso error on cursor %s, attempt %d/3: %s", op, attempt + 1, exc)
+                try:
+                    self._conn._reconnect()
+                    self._cursor = self._conn._conn.cursor()
+                except Exception as recon_exc:
+                    _logger.warning("Reconnect failed on cursor attempt %d: %s", attempt + 1, recon_exc)
+                    # Get a fresh cursor from whatever connection state we have
+                    if self._conn and self._conn._conn:
+                        self._cursor = self._conn._conn.cursor()
+
     def execute(self, sql, params=None):
-        await_only(asyncio.to_thread(self._cursor.execute, sql, params or ()))
+        self._retry_cursor_op("execute", sql, params or ())
         return self
 
     def executemany(self, sql, params_seq):
-        await_only(asyncio.to_thread(self._cursor.executemany, sql, params_seq))
+        self._retry_cursor_op("executemany", sql, params_seq)
         return self
 
     def fetchone(self):

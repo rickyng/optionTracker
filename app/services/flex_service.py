@@ -27,6 +27,15 @@ async def trigger_flex_download(
     user_account_ids: list[int] | None = None,
 ) -> str:
     """Start a Flex download job. Returns job_id."""
+    # Dedup: return existing job if account already has an active one
+    for jid, job in _jobs.items():
+        if (
+            job["account_id"] == account_id
+            and job["status"] in ("pending", "requesting", "polling")
+        ):
+            logger.info("Reusing active job %s for account %d", jid, account_id)
+            return jid
+
     job_id = str(uuid.uuid4())[:8]
     _jobs[job_id] = {
         "account_id": account_id,

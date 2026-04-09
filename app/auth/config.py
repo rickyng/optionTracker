@@ -1,6 +1,9 @@
+import logging
 import secrets
 
 from pydantic_settings import BaseSettings
+
+_logger = logging.getLogger(__name__)
 
 
 class AuthSettings(BaseSettings):
@@ -17,8 +20,17 @@ class AuthSettings(BaseSettings):
     def model_post_init(self, __context):
         if not self.session_secret:
             self.session_secret = secrets.token_urlsafe(32)
+            _logger.warning(
+                "IBKR_SESSION_SECRET not set — generated a random secret. "
+                "Existing sessions will be invalidated on every deploy. "
+                "Set IBKR_SESSION_SECRET in environment for persistent sessions."
+            )
         if not self.internal_api_key:
             self.internal_api_key = secrets.token_urlsafe(32)
+            _logger.warning(
+                "IBKR_INTERNAL_API_KEY not set — generated a random key. "
+                "Set IBKR_INTERNAL_API_KEY in environment for persistence across deploys."
+            )
 
 
 auth_settings = AuthSettings()

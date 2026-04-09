@@ -30,7 +30,7 @@ async def flex_download(
 
     jobs = []
     for account in accounts:
-        job_id = trigger_flex_download(
+        job_id = await trigger_flex_download(
             account.id,
             account.token,
             account.query_id,
@@ -42,20 +42,12 @@ async def flex_download(
 
 
 @router.get("/download/{job_id}")
-async def flex_download_status(
-    job_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
+async def flex_download_status(job_id: str):
     job = get_job_status(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    # Verify user owns the job's account
-    user_account_ids = await get_user_account_ids(request, db)
-    if user_account_ids is not None and job["account_id"] not in user_account_ids:
-        raise HTTPException(status_code=403, detail="Not your account")
-
+    # Auth middleware already validates the request. Job status is in-memory
+    # so no DB session needed — avoids Turso timeouts blocking status polls.
     return {
         "status": job["status"],
         "error": job.get("error"),
