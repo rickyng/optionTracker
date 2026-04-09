@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,7 +71,9 @@ async def import_csv(
     try:
         # Clear old positions so the latest query fully replaces them (atomic: no auto_commit)
         await clear_positions(db, account_id, user_account_ids=user_account_ids, auto_commit=False)
-        pos_count = await upsert_positions_from_flex(db, position_rows, user_account_ids=user_account_ids)
+        pos_count = await upsert_positions_from_flex(
+            db, position_rows, user_account_ids=user_account_ids, auto_commit=False
+        )
     except Exception as e:
         logger.error("Failed to import positions: %s", e)
         await db.rollback()
@@ -107,4 +110,19 @@ async def import_csv(
     # Invalidate caches so dashboard reflects new data
     invalidate_all_caches()
 
+    # Trigger background price refresh for new underlyings
+    asyncio.create_task(_refresh_prices_background(user_account_ids))
+
     return {"positions_imported": pos_count, "trades_imported": trade_count}
+
+
+async def _refresh_prices_background(user_account_ids: list[int] | None) -> None:
+    """Background task to refresh prices after import."""
+    try:
+        from app.database import async_session
+        from app.services.market_price_service import refresh_all_prices
+
+        async with async_session() as db:
+            await refresh_all_prices(db, user_account_ids)
+    except Exception:
+        logger.exception("Background price refresh failed")
