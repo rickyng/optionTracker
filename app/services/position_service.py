@@ -1,6 +1,7 @@
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_market
 from app.models.account import Account
 from app.models.open_option import OpenOption
 from app.schemas.position import Position
@@ -12,6 +13,7 @@ async def list_positions(
     *,
     account_id: int | None = None,
     underlying: str | None = None,
+    market: str | None = None,
     user_account_ids: list[int] | None = None,
 ) -> list[Position]:
     query = select(OpenOption, Account.name).join(Account, OpenOption.account_id == Account.id)
@@ -23,6 +25,8 @@ async def list_positions(
         query = query.where(OpenOption.underlying == underlying)
     result = await db.execute(query)
     rows = result.all()
+    if market:
+        rows = [(o, name) for o, name in rows if get_market(o.underlying) == market]
     return [
         Position(
             id=o.id,
@@ -119,6 +123,7 @@ async def upsert_positions_from_flex(
     positions: list[dict],
     *,
     user_account_ids: list[int] | None = None,
+    auto_commit: bool = True,
 ) -> int:
     """Bulk insert/update positions from Flex import. Returns count of upserted rows."""
     if not positions:
@@ -154,6 +159,7 @@ async def upsert_positions_from_flex(
             db.add(obj)
             existing_map[key] = obj
         count += 1
-    await db.commit()
-    invalidate_all_caches()
+    if auto_commit:
+        await db.commit()
+        invalidate_all_caches()
     return count

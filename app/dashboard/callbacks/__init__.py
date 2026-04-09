@@ -88,6 +88,26 @@ def _get_user_headers():
     return headers
 
 
+def _api_get(path, params=None, timeout=5):
+    """GET from internal API. Returns parsed JSON or None on error."""
+    try:
+        resp = requests.get(f"{API_BASE}{path}", params=params, headers=_get_user_headers(), timeout=timeout)
+        return resp.json()
+    except Exception as e:
+        _logger.warning("API GET %s failed: %s", path, e)
+        return None
+
+
+def _filter_params(account_val, market_val):
+    """Build query params dict from account and market dropdown values."""
+    params = {}
+    if account_val != "all":
+        params["account_id"] = int(account_val)
+    if market_val != "all":
+        params["market"] = market_val
+    return params
+
+
 def register_all_callbacks(dash_app):
     """Register all dashboard callbacks."""
 
@@ -106,23 +126,38 @@ def register_all_callbacks(dash_app):
         layout_fn = layouts.get(active_tab, overview_layout)
         return layout_fn()
 
+    # ---- Data loaders: populate stores on load + on account changes ----
     @dash_app.callback(
-        Output("account-selector", "options"),
-        Output("account-selector", "value"),
+        Output("accounts-store", "data"),
+        Input("boot-interval", "n_intervals"),
         Input("main-tabs", "active_tab"),
         Input("add-account-status", "children"),
         Input("edit-account-status", "children"),
         Input("remove-account-signal", "data"),
     )
-    def update_account_selector(_, __, ___, ____):
-        try:
-            resp = requests.get(f"{API_BASE}/api/accounts", headers=_get_user_headers(), timeout=15)
-            accounts = resp.json()
-            options = [{"label": "All Accounts", "value": "all"}]
+    def load_accounts(_, __, ___, ____, _____):
+        """Fetch accounts list into store. Used by account selector and settings."""
+        return _api_get("/api/accounts") or []
+
+    @dash_app.callback(
+        Output("user-store", "data"),
+        Input("boot-interval", "n_intervals"),
+        Input("main-tabs", "active_tab"),
+    )
+    def load_user(_, __):
+        """Fetch user info into store. Session-scoped, doesn't change."""
+        return _api_get("/api/me") or {}
+
+    @dash_app.callback(
+        Output("account-selector", "options"),
+        Input("accounts-store", "data"),
+    )
+    def update_account_selector(accounts):
+        """Build dropdown options from cached accounts store."""
+        options = [{"label": "All Accounts", "value": "all"}]
+        if accounts:
             options += [{"label": a["name"], "value": str(a["id"])} for a in accounts]
-            return options, dash.no_update
-        except Exception:
-            return [{"label": "All Accounts", "value": "all"}], dash.no_update
+        return options
 
     # ---- Risk cap sync ----
     @dash_app.callback(
@@ -140,17 +175,16 @@ def register_all_callbacks(dash_app):
         Output("underlying-exposure-table", "children"),
         Input("account-selector", "value"),
         Input("risk-cap-pct", "data"),
+        Input("market-selector", "value"),
     )
-    def update_overview(account_val, cap_pct):
+    def update_overview(account_val, cap_pct, market_val):
         cap_pct = cap_pct or 30
         try:
-            params = {}
-            if account_val and account_val != "all":
-                params["account_id"] = int(account_val)
+            params = _filter_params(account_val, market_val)
             params["risk_margin_pct"] = cap_pct
 
             resp = requests.get(
-                f"{API_BASE}/api/dashboard/summary", params=params, headers=_get_user_headers(), timeout=30
+                f"{API_BASE}/api/dashboard/summary", params=params, headers=_get_user_headers(), timeout=15
             )
             data = resp.json()
             cards = make_summary_cards(data)
@@ -186,10 +220,25 @@ def register_all_callbacks(dash_app):
             )
 
             details_list = []
+            unavailable_underlying_count = 0
             for u in sorted(exposure.keys()):
                 e = exposure[u]
                 mp = e.get("market_price")
-                mp_str = f"${mp:,.2f}" if mp else "-"
+                price_unavail = e.get("price_unavailable", False)
+                if price_unavail:
+                    unavailable_underlying_count += 1
+                mp_str = f"${mp:,.2f}" if mp is not None else "N/A"
+                mp_style = {**td_style, "color": TEXT_PRIMARY, "display": "inline-block", "width": "20%"}
+                if mp is None:
+                    mp_style["color"] = ACCENT_WARN
+                    mp_style["fontStyle"] = "italic"
+
+                loss_val = e.get("est_loss", 0)
+                loss_str = fmt_money(loss_val)
+                loss_style = {**td_style, "color": ACCENT_LOSS, "display": "inline-block", "width": "20%"}
+                if price_unavail:
+                    loss_str = f"{loss_str} *"
+                    loss_style["color"] = ACCENT_WARN
 
                 summary_row = html.Summary(
                     html.Div(
@@ -206,15 +255,15 @@ def register_all_callbacks(dash_app):
                             ),
                             html.Span(
                                 mp_str,
-                                style={**td_style, "color": TEXT_PRIMARY, "display": "inline-block", "width": "20%"},
+                                style=mp_style,
                             ),
                             html.Span(
                                 fmt_money(e.get("est_profit", 0)),
                                 style={**td_style, "color": ACCENT_PROFIT, "display": "inline-block", "width": "20%"},
                             ),
                             html.Span(
-                                fmt_money(e.get("est_loss", 0)),
-                                style={**td_style, "color": ACCENT_LOSS, "display": "inline-block", "width": "20%"},
+                                loss_str,
+                                style=loss_style,
                             ),
                         ],
                         style={"display": "flex", "alignItems": "center"},
@@ -260,7 +309,7 @@ def register_all_callbacks(dash_app):
                 pos_rows = []
                 for pos in positions:
                     pos_rmp = pos.get("risk_margin_price")
-                    pos_rmp_str = f"${pos_rmp:,.2f}" if pos_rmp else "-"
+                    pos_rmp_str = f"${pos_rmp:,.2f}" if pos_rmp is not None else "N/A"
                     pos_rows.append(
                         html.Tr(
                             [
@@ -328,43 +377,83 @@ def register_all_callbacks(dash_app):
                 )
 
             exposure_table = html.Div([header_bar] + details_list, style={"width": "100%", "overflowX": "auto"})
+
+            if unavailable_underlying_count:
+                warning = dbc.Alert(
+                    f"Price data unavailable for {unavailable_underlying_count} underlying(s). "
+                    "Estimated losses shown as $0.00 may not reflect actual risk.",
+                    color="warning",
+                    style={"fontSize": "0.85rem", "marginBottom": "1rem"},
+                )
+                exposure_table = html.Div([warning, exposure_table])
+
             return cards, exposure_table
         except Exception as e:
             return html.Div(f"Error loading overview: {e}"), html.Div("")
+
+    # ---- Refresh Prices callback ----
+    @dash_app.callback(
+        Output("refresh-prices-status", "children"),
+        Input("refresh-prices-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def refresh_prices(n_clicks):
+        if not n_clicks:
+            return ""
+        try:
+            resp = requests.post(
+                f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=120
+            )
+            data = resp.json()
+            refreshed = data.get("refreshed", 0)
+            failed = data.get("failed", 0)
+            if failed > 0:
+                return f"Updated {refreshed}, failed {failed}"
+            return f"Updated {refreshed} prices"
+        except Exception as e:
+            return f"Error: {e}"
+
+    # ---- Positions data loader ----
+    @dash_app.callback(
+        Output("positions-store", "data"),
+        Input("account-selector", "value"),
+        Input("market-selector", "value"),
+    )
+    def load_positions(account_val, market_val):
+        """Fetch positions into store, shared by positions tab and expiration tab."""
+        params = _filter_params(account_val, market_val)
+        data = _api_get("/api/positions", params=params)
+        if data is None:
+            return []
+        # Enrich with days-to-expiry once
+        for p in data:
+            try:
+                p["days_to_expiry"] = (date.fromisoformat(p["expiry"]) - date.today()).days
+            except (ValueError, KeyError):
+                p["days_to_expiry"] = 999
+        return data
 
     # ---- Positions callbacks ----
     @dash_app.callback(
         Output("positions-table", "data"),
         Output("positions-table", "columns"),
-        Input("account-selector", "value"),
+        Input("positions-store", "data"),
     )
-    def update_positions(account_val):
-        try:
-            params = {}
-            if account_val and account_val != "all":
-                params["account_id"] = int(account_val)
-            resp = requests.get(f"{API_BASE}/api/positions", params=params, headers=_get_user_headers(), timeout=10)
-            positions = resp.json()
-            for p in positions:
-                try:
-                    exp = date.fromisoformat(p["expiry"])
-                    p["days_to_expiry"] = (exp - date.today()).days
-                except (ValueError, KeyError):
-                    p["days_to_expiry"] = 999
-            cols = [
-                {"name": "Account", "id": "account_name"},
-                {"name": "Underlying", "id": "underlying"},
-                {"name": "Expiry", "id": "expiry"},
-                {"name": "Strike", "id": "strike"},
-                {"name": "Right", "id": "right"},
-                {"name": "Qty", "id": "quantity"},
-                {"name": "Entry", "id": "entry_premium"},
-                {"name": "Mark", "id": "mark_price"},
-                {"name": "DTE", "id": "days_to_expiry"},
-            ]
-            return positions, cols
-        except Exception:
+    def update_positions(positions):
+        if not positions:
             return [], []
+        cols = [
+            {"name": "Account", "id": "account_name"},
+            {"name": "Underlying", "id": "underlying"},
+            {"name": "Expiry", "id": "expiry"},
+            {"name": "Strike", "id": "strike"},
+            {"name": "Right", "id": "right"},
+            {"name": "Qty", "id": "quantity"},
+            {"name": "Entry", "id": "entry_premium"},
+            {"name": "Mark", "id": "mark_price"},
+            {"name": "DTE", "id": "days_to_expiry"},
+        ]
+        return positions, cols
 
     # ---- Risk callbacks ----
     @dash_app.callback(
@@ -373,22 +462,21 @@ def register_all_callbacks(dash_app):
         Output("account-risk-chart", "figure"),
         Output("riskiest-positions", "children"),
         Input("account-selector", "value"),
+        Input("market-selector", "value"),
         State("risk-cap-pct", "data"),
     )
-    def update_risk(account_val, cap_pct):
+    def update_risk(account_val, market_val, cap_pct):
         empty_fig = go.Figure()
         empty_fig.update_layout(**PLOT_LAYOUT)
         cap_pct = cap_pct or 30
         try:
-            params = {}
-            if account_val and account_val != "all":
-                params["account_id"] = int(account_val)
+            params = _filter_params(account_val, market_val)
 
             # Single API call fetches all margin percentages at once
             pcts_to_fetch = sorted(set([0, 5, 10, 20, cap_pct]))
             params["pcts"] = ",".join(str(p) for p in pcts_to_fetch)
             resp = requests.get(
-                f"{API_BASE}/api/dashboard/summary-multi", params=params, headers=_get_user_headers(), timeout=30
+                f"{API_BASE}/api/dashboard/summary-multi", params=params, headers=_get_user_headers(), timeout=15
             )
             pct_data = resp.json()
 
@@ -507,17 +595,25 @@ def register_all_callbacks(dash_app):
             else:
                 acct_fig = empty_fig
 
-            # -- Top 10 riskiest positions (by est. loss) --
-            sorted_positions = sorted(
-                all_positions,
-                key=lambda p: -float(p.get("est_loss", 0)),
-            )[:10]
+            # -- Top 10 riskiest positions (price-unavailable first, then by est. loss) --
+            def _risk_sort_key(p):
+                """Sort by: price-unavailable first (highest priority), then by est_loss descending."""
+                if p.get("price_unavailable"):
+                    return (0, float("inf"))
+                return (1, -float(p.get("est_loss", 0)))
+
+            sorted_positions = sorted(all_positions, key=_risk_sort_key)[:10]
             if not sorted_positions:
                 riskiest = html.Small("No positions found.", style={"color": TEXT_SECONDARY})
             else:
                 items = []
                 for p in sorted_positions:
                     loss = float(p.get("est_loss", 0))
+                    unavail = p.get("price_unavailable", False)
+                    loss_color = ACCENT_WARN if unavail else ACCENT_LOSS
+                    loss_text = f"Est. Loss: {fmt_money(loss)}"
+                    if unavail:
+                        loss_text = f"{loss_text} (price unavailable)"
                     items.append(
                         dbc.Card(
                             [
@@ -533,8 +629,19 @@ def register_all_callbacks(dash_app):
                                         ),
                                         html.Br(),
                                         html.Small(
-                                            f"Est. Loss: {fmt_money(loss)} | Expiry: {p.get('expiry', '')}",
-                                            style={"color": ACCENT_LOSS},
+                                            f"{loss_text} | Expiry: {p.get('expiry', '')}",
+                                            style={"color": loss_color},
+                                        ),
+                                        *(
+                                            [
+                                                html.Br(),
+                                                html.Small(
+                                                    "Risk unknown — price fetch failed",
+                                                    style={"color": ACCENT_WARN, "fontStyle": "italic"},
+                                                ),
+                                            ]
+                                            if unavail
+                                            else []
                                         ),
                                     ]
                                 )
@@ -564,53 +671,47 @@ def register_all_callbacks(dash_app):
         Output("expiry-7to14", "children"),
         Output("expiry-14to21", "children"),
         Output("expiry-gt21", "children"),
-        Input("account-selector", "value"),
+        Input("positions-store", "data"),
     )
-    def update_expiration(account_val):
-        try:
-            params = {}
-            if account_val and account_val != "all":
-                params["account_id"] = int(account_val)
-            resp = requests.get(f"{API_BASE}/api/positions", params=params, headers=_get_user_headers(), timeout=10)
-            positions = resp.json()
-
-            lt7, w7to14, w14to21, gt21 = [], [], [], []
-            for p in positions:
-                try:
-                    dte = (date.fromisoformat(p["expiry"]) - date.today()).days
-                    item = dbc.Card(
-                        [
-                            dbc.CardBody(
-                                [
-                                    html.Strong(p["underlying"], style={"color": TEXT_PRIMARY}),
-                                    html.Span(f" {p['right']} {p['strike']}", style={"color": TEXT_SECONDARY}),
-                                    html.Br(),
-                                    html.Small(f"{p['account_name']} | DTE: {dte}", style={"color": TEXT_SECONDARY}),
-                                ]
-                            ),
-                        ],
-                        style={
-                            "backgroundColor": BG_CARD,
-                            "border": f"1px solid {BORDER}",
-                            "borderRadius": "8px",
-                        },
-                        className="mb-1",
-                    )
-                    if dte < 7:
-                        lt7.append(item)
-                    elif dte < 14:
-                        w7to14.append(item)
-                    elif dte < 21:
-                        w14to21.append(item)
-                    else:
-                        gt21.append(item)
-                except (ValueError, KeyError):
-                    pass
-
-            return _with_count(lt7), _with_count(w7to14), _with_count(w14to21), _with_count(gt21)
-        except Exception:
-            empty = [html.Small("Error")]
+    def update_expiration(positions):
+        if not positions:
+            empty = [html.Small("No positions")]
             return empty, empty, empty, empty
+
+        lt7, w7to14, w14to21, gt21 = [], [], [], []
+        for p in positions:
+            try:
+                dte = p.get("days_to_expiry", 999)
+                item = dbc.Card(
+                    [
+                        dbc.CardBody(
+                            [
+                                html.Strong(p["underlying"], style={"color": TEXT_PRIMARY}),
+                                html.Span(f" {p['right']} {p['strike']}", style={"color": TEXT_SECONDARY}),
+                                html.Br(),
+                                html.Small(f"{p['account_name']} | DTE: {dte}", style={"color": TEXT_SECONDARY}),
+                            ]
+                        ),
+                    ],
+                    style={
+                        "backgroundColor": BG_CARD,
+                        "border": f"1px solid {BORDER}",
+                        "borderRadius": "8px",
+                    },
+                    className="mb-1",
+                )
+                if dte < 7:
+                    lt7.append(item)
+                elif dte < 14:
+                    w7to14.append(item)
+                elif dte < 21:
+                    w14to21.append(item)
+                else:
+                    gt21.append(item)
+            except (ValueError, KeyError):
+                pass
+
+        return _with_count(lt7), _with_count(w7to14), _with_count(w14to21), _with_count(gt21)
 
     # ---- Settings callbacks ----
 
@@ -626,92 +727,87 @@ def register_all_callbacks(dash_app):
         if isinstance(triggered, dict) and triggered.get("type") == "remove-account-btn":
             account_id = triggered["index"]
             with contextlib.suppress(Exception):
-                requests.delete(f"{API_BASE}/api/accounts/{account_id}", headers=_get_user_headers(), timeout=10)
+                requests.delete(f"{API_BASE}/api/accounts/{account_id}", headers=_get_user_headers(), timeout=5)
             return account_id
         return dash.no_update
 
     @dash_app.callback(
         Output("accounts-list", "children"),
-        Input("account-selector", "value"),
-        Input("main-tabs", "active_tab"),
-        Input("add-account-status", "children"),
-        Input("edit-account-status", "children"),
-        Input("remove-account-signal", "data"),
+        Input("accounts-store", "data"),
     )
-    def update_accounts_list(_, __, ___, ____, _____):
-        try:
-            resp = requests.get(f"{API_BASE}/api/accounts", headers=_get_user_headers(), timeout=15)
-            accounts = resp.json()
-            items = []
-            for a in accounts:
-                items.append(
-                    dbc.Card(
-                        [
-                            dbc.CardBody(
-                                [
-                                    dbc.Row(
-                                        [
-                                            dbc.Col(
-                                                [
-                                                    html.Strong(a["name"], style={"color": TEXT_PRIMARY}),
-                                                    html.Span(f" (ID: {a['id']})", style={"color": TEXT_SECONDARY}),
-                                                    html.Br(),
-                                                    html.Small(
-                                                        f"Token: {a['token']} | Query ID: {a['query_id']}",
-                                                        style={"color": TEXT_SECONDARY},
-                                                    ),
-                                                ],
-                                                width="auto",
-                                            ),
-                                            dbc.Col(
-                                                [
-                                                    dbc.Badge(
-                                                        "Enabled" if a["enabled"] else "Disabled",
-                                                        color="success" if a["enabled"] else "secondary",
-                                                    ),
-                                                ],
-                                                width="auto",
-                                                className="me-3",
-                                            ),
-                                            dbc.Col(
-                                                [
-                                                    dbc.Button(
-                                                        "Edit",
-                                                        id={"type": "edit-account-btn", "index": a["id"]},
-                                                        size="sm",
-                                                        color="info",
-                                                        className="me-1",
-                                                    ),
-                                                    dbc.Button(
-                                                        "Remove",
-                                                        id={"type": "remove-account-btn", "index": a["id"]},
-                                                        size="sm",
-                                                        color="danger",
-                                                    ),
-                                                ],
-                                                width="auto",
-                                            ),
-                                        ],
-                                        align="center",
-                                        justify="start",
-                                    ),
-                                ]
-                            ),
-                        ],
-                        style={
-                            "backgroundColor": BG_CARD,
-                            "border": f"1px solid {BORDER}",
-                            "borderRadius": "8px",
-                        },
-                        className="mb-2",
-                    )
+    def update_accounts_list(accounts):
+        """Build accounts list in settings from cached store."""
+        if not accounts:
+            return []
+        items = []
+        for a in accounts:
+            items.append(
+                dbc.Card(
+                    [
+                        dbc.CardBody(
+                            [
+                                dbc.Row(
+                                    [
+                                        dbc.Col(
+                                            [
+                                                html.Strong(a["name"], style={"color": TEXT_PRIMARY}),
+                                                html.Span(f" (ID: {a['id']})", style={"color": TEXT_SECONDARY}),
+                                                html.Br(),
+                                                html.Small(
+                                                    f"Token: {a['token']} | Query ID: {a['query_id']}",
+                                                    style={"color": TEXT_SECONDARY},
+                                                ),
+                                            ],
+                                            width="auto",
+                                        ),
+                                        dbc.Col(
+                                            [
+                                                dbc.Badge(
+                                                    "Enabled" if a["enabled"] else "Disabled",
+                                                    color="success" if a["enabled"] else "secondary",
+                                                ),
+                                            ],
+                                            width="auto",
+                                            className="me-3",
+                                        ),
+                                        dbc.Col(
+                                            [
+                                                dbc.Button(
+                                                    "Edit",
+                                                    id={"type": "edit-account-btn", "index": a["id"]},
+                                                    size="sm",
+                                                    color="info",
+                                                    className="me-1",
+                                                ),
+                                                dbc.Button(
+                                                    "Remove",
+                                                    id={"type": "remove-account-btn", "index": a["id"]},
+                                                    size="sm",
+                                                    color="danger",
+                                                ),
+                                            ],
+                                            width="auto",
+                                        ),
+                                    ],
+                                    align="center",
+                                    justify="start",
+                                ),
+                            ]
+                        ),
+                    ],
+                    style={
+                        "backgroundColor": BG_CARD,
+                        "border": f"1px solid {BORDER}",
+                        "borderRadius": "8px",
+                    },
+                    className="mb-2",
                 )
-            return items
-        except Exception as e:
-            return html.Div(f"Error: {e}")
+            )
+        return items
 
     @dash_app.callback(
         Output("edit-account-form", "style"),
+        Output("edit-account-form", "className"),
         Output("edit-account-id", "data"),
         Output("edit-account-name", "value"),
         Output("edit-account-token", "value"),
@@ -725,15 +821,16 @@ def register_all_callbacks(dash_app):
         triggered = dash.callback_context.triggered_id
         # Cancel button or no trigger → hide form
         if triggered == "cancel-edit-btn" or not triggered:
-            return {"display": "none"}, dash.no_update, "", "", "", "true"
+            return {"display": "none"}, "d-none", dash.no_update, "", "", "", "true"
         # Edit button clicked
         if isinstance(triggered, dict) and triggered.get("type") == "edit-account-btn":
             account_id = triggered["index"]
             try:
-                resp = requests.get(f"{API_BASE}/api/accounts/{account_id}", headers=_get_user_headers(), timeout=15)
+                resp = requests.get(f"{API_BASE}/api/accounts/{account_id}", headers=_get_user_headers(), timeout=5)
                 a = resp.json()
                 return (
                     {"display": "block"},
+                    "",
                     account_id,
                     a.get("name", ""),
                     a.get("token", ""),
@@ -741,8 +838,8 @@ def register_all_callbacks(dash_app):
                     "true" if a.get("enabled") else "false",
                 )
             except Exception:
-                return {"display": "none"}, dash.no_update, "", "", "", "true"
-        return {"display": "none"}, dash.no_update, "", "", "", "true"
+                return {"display": "none"}, "d-none", dash.no_update, "", "", "", "true"
+        return {"display": "none"}, "d-none", dash.no_update, "", "", "", "true"
 
     @dash_app.callback(
         Output("edit-account-status", "children"),
@@ -771,7 +868,7 @@ def register_all_callbacks(dash_app):
                 f"{API_BASE}/api/accounts/{account_id}",
                 params=params,
                 headers=_get_user_headers(),
-                timeout=10,
+                timeout=5,
             )
             result, err = _safe_json_resp(resp)
             if err:
@@ -828,12 +925,12 @@ def register_all_callbacks(dash_app):
         attempts = (store_data or {}).get("attempts", 0)
         _logger.info("handle_sync triggered=%s jobs=%s attempts=%s", triggered, current_job_ids, attempts)
 
-        # Case 1: Button click — trigger downloads
-        if triggered == "sync-all-btn.n_clicks":
+        # Case 1: Button click — trigger downloads (guard against DOM-mount trigger)
+        if triggered == "sync-all-btn.n_clicks" and n_clicks:
             try:
                 url = f"{API_BASE}/api/flex/download"
                 _logger.info("POST %s", url)
-                resp = requests.post(url, headers=_get_user_headers(), timeout=30)
+                resp = requests.post(url, headers=_get_user_headers(), timeout=15)
                 _logger.info("POST response: status=%s body=%s", resp.status_code, resp.text[:500])
                 if not resp.ok:
                     return {}, [html.Small(
@@ -865,7 +962,7 @@ def register_all_callbacks(dash_app):
                             className="mb-1",
                         )
                     )
-                return {"ids": job_ids, "attempts": 0}, cards, len(job_ids) == 0
+                return {"ids": job_ids, "attempts": 0, "statuses": {}, "fail_counts": {}}, cards, len(job_ids) == 0
             except Exception as e:
                 _logger.exception("handle_sync button click failed")
                 return {}, [html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})], True
@@ -876,6 +973,8 @@ def register_all_callbacks(dash_app):
 
         attempts += 1
         timed_out = attempts >= _max_poll_attempts
+        last_statuses = (store_data or {}).get("statuses", {})
+        fail_counts: dict = (store_data or {}).get("fail_counts", {})
 
         headers = _get_user_headers()
         _logger.info("Polling %d jobs (attempt %d/%d): %s", len(current_job_ids), attempts, _max_poll_attempts, current_job_ids)
@@ -883,13 +982,13 @@ def register_all_callbacks(dash_app):
         def _fetch_job(job_id):
             try:
                 resp = requests.get(
-                    f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=10
+                    f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=15
                 )
                 _logger.info("Poll %s: status=%s body=%s", job_id, resp.status_code, resp.text[:200])
                 return job_id, resp.json()
             except Exception as e:
                 _logger.warning("Poll %s failed: %s", job_id, e)
-                return job_id, {"status": "unknown", "error": f"Failed to fetch status: {e}"}
+                return job_id, None
 
         results: dict[str, dict] = {}
         with ThreadPoolExecutor() as pool:
@@ -901,8 +1000,17 @@ def register_all_callbacks(dash_app):
         cards = []
         all_done = True
         for job_id in current_job_ids:
-            data = results.get(job_id, {"status": "unknown"})
-            status = data.get("status", "unknown")
+            data = results.get(job_id)
+            poll_failed = data is None
+            if not poll_failed:
+                status = data.get("status", "unknown")
+                last_statuses[job_id] = data
+                fail_counts[job_id] = 0
+            else:
+                # Poll failed — reuse last-known result if available
+                data = last_statuses.get(job_id, {"status": "unknown"})
+                status = data.get("status", "unknown")
+                fail_counts[job_id] = fail_counts.get(job_id, 0) + 1
             if status == "completed":
                 badge = dbc.Badge("Completed", color="success")
                 detail = html.Small(
@@ -921,7 +1029,11 @@ def register_all_callbacks(dash_app):
                 all_done = False
                 label = {"requesting": "Requesting...", "polling": "Polling..."}.get(status, "Pending...")
                 badge = dbc.Badge(label, color="warning")
-                detail = ""
+                retry_count = fail_counts.get(job_id, 0)
+                detail = html.Small(
+                    f" — retrying ({retry_count})" if retry_count else "",
+                    style={"color": ACCENT_WARN, "marginLeft": "0.5rem"},
+                )
 
             cards.append(
                 dbc.Card(
@@ -939,23 +1051,17 @@ def register_all_callbacks(dash_app):
 
         # Stop polling if all done or timed out
         stop = all_done or timed_out
-        new_store = {"ids": current_job_ids, "attempts": attempts}
+        new_store = {"ids": current_job_ids, "attempts": attempts, "statuses": last_statuses, "fail_counts": fail_counts}
         return new_store, cards, stop
 
     # ---- User Menu callback ----
     @dash_app.callback(
         Output("user-menu", "children"),
-        Input("main-tabs", "active_tab"),
+        Input("user-store", "data"),
     )
-    def update_user_menu(_):
-        """Populate user info (avatar, name, logout) from /api/me."""
-        try:
-            resp = requests.get(f"{API_BASE}/api/me", headers=_get_user_headers(), timeout=5)
-            data = resp.json()
-        except Exception:
-            return html.Div()
-
-        if not data.get("authenticated"):
+    def update_user_menu(data):
+        """Build user menu from cached user store."""
+        if not data or not data.get("authenticated"):
             return html.Div()
 
         name = data.get("name", "")

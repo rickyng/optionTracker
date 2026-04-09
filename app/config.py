@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 
 # FX rates: non-USD suffix → rate to convert to USD.
 # Detect currency from the underlying symbol suffix (e.g. "1321.T" = Tokyo).
+# Purely numeric symbols are assumed to be HK stocks (e.g. "1299" → HKD).
 FX_RATES: dict[str, float] = {
     ".T": 0.0067,  # JPY → USD (Tokyo Stock Exchange)
     ".HK": 0.13,  # HKD → USD (Hong Kong Stock Exchange)
@@ -12,11 +13,26 @@ def get_fx_rate(underlying: str) -> float:
     """Return the FX rate to convert this underlying's currency to USD.
 
     Returns 1.0 for USD-denominated symbols.
+    Purely numeric symbols (e.g. "1299") are treated as HK stocks.
     """
+    # Check for explicit suffix
     for suffix, rate in FX_RATES.items():
         if underlying.upper().endswith(suffix.upper()):
             return rate
+    # Purely numeric symbols are HK stocks
+    if underlying.isdigit():
+        return FX_RATES[".HK"]
     return 1.0
+
+
+def get_market(underlying: str) -> str:
+    """Return the market code for an underlying symbol: 'US', 'JP', or 'HK'."""
+    if underlying.isdigit():
+        return "HK"
+    for suffix in FX_RATES:
+        if underlying.upper().endswith(suffix.upper()):
+            return "JP" if suffix == ".T" else "HK"
+    return "US"
 
 
 class Settings(BaseSettings):

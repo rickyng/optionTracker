@@ -29,6 +29,7 @@ def settings_layout():
             # ── Edit Account Form (hidden by default) ───────────────────
             html.Div(
                 id="edit-account-form",
+                className="d-none",
                 style={"display": "none"},
                 children=[
                     card(

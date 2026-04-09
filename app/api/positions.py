@@ -12,11 +12,12 @@ async def list_positions(
     request: Request,
     account_id: int | None = Query(None),
     underlying: str | None = Query(None),
+    market: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     user_account_ids = await get_user_account_ids(request, db)
     positions = await position_service.list_positions(
-        db, account_id=account_id, underlying=underlying, user_account_ids=user_account_ids
+        db, account_id=account_id, underlying=underlying, market=market, user_account_ids=user_account_ids
     )
     return [p.model_dump() for p in positions]
 

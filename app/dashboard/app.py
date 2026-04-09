@@ -114,6 +114,36 @@ def create_dash_app(fastapi_app):
                                         ],
                                         width="auto",
                                     ),
+                                    dbc.Col(
+                                        [
+                                            html.Div(
+                                                [
+                                                    html.Span(
+                                                        "Market ",
+                                                        className="me-1",
+                                                        style={
+                                                            "fontSize": "0.85rem",
+                                                            "color": TEXT_SECONDARY,
+                                                        },
+                                                    ),
+                                                    dcc.Dropdown(
+                                                        id="market-selector",
+                                                        options=[
+                                                            {"label": "All Markets", "value": "all"},
+                                                            {"label": "US", "value": "US"},
+                                                            {"label": "Japan", "value": "JP"},
+                                                            {"label": "Hong Kong", "value": "HK"},
+                                                        ],
+                                                        value="all",
+                                                        clearable=False,
+                                                        style={"minWidth": 120, "maxWidth": 160, "width": "100%"},
+                                                    ),
+                                                ],
+                                                className="d-flex align-items-center",
+                                            ),
+                                        ],
+                                        width="auto",
+                                    ),
                                     # User menu
                                     dbc.Col(
                                         html.Div(id="user-menu"),
@@ -139,7 +169,11 @@ def create_dash_app(fastapi_app):
                 [
                     dcc.Store(id="risk-cap-pct", data=30),
                     dcc.Store(id="sync-job-ids", data=[]),
+                    dcc.Store(id="accounts-store", data=[]),
+                    dcc.Store(id="user-store", data={}),
+                    dcc.Store(id="positions-store", data=[]),
                     dcc.Interval(id="sync-poll-interval", interval=2000, disabled=True),
+                    dcc.Interval(id="boot-interval", interval=100, max_intervals=1, disabled=False),
                     dbc.Tabs(
                         [
                             dbc.Tab(label="Overview", tab_id="overview"),
