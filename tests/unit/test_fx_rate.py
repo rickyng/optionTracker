@@ -18,6 +18,13 @@ class TestGetFxRate:
         assert get_fx_rate("SPY") == 1.0
         assert get_fx_rate("MSFT") == 1.0
 
+    def test_numeric_hk_stock(self):
+        assert get_fx_rate("1299") == 0.13
+
+    def test_numeric_hk_stock_multidigit(self):
+        assert get_fx_rate("0700") == 0.13
+        assert get_fx_rate("1") == 0.13
+
     def test_empty_string(self):
         assert get_fx_rate("") == 1.0
 
