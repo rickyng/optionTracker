@@ -9,6 +9,7 @@ from app.api.deps import get_db, get_user_account_ids
 from app.schemas.position import Position
 from app.schemas.strategy import Strategy
 from app.services import position_service, strategy_service
+from app.services.earnings_service import get_earnings_dates
 from app.services.market_price_service import get_prices
 from app.utils.cache import dashboard_summary_cache, user_cache_key
 
@@ -32,8 +33,8 @@ async def _load_shared_data(
     account_id: int | None,
     user_account_ids: list[int] | None,
     market: str | None = None,
-) -> tuple[list[Position], list[Strategy], dict[int, str], dict[str, float | None]]:
-    """Load positions, strategies, account names, and market prices in one pass."""
+) -> tuple[list[Position], list[Strategy], dict[int, str], dict[str, float | None], dict[str, str | None]]:
+    """Load positions, strategies, account names, market prices, and earnings dates in one pass."""
     positions = await position_service.list_positions(
         db, account_id=account_id, market=market, user_account_ids=user_account_ids
     )
@@ -44,7 +45,8 @@ async def _load_shared_data(
     account_names = {p.account_id: p.account_name for p in positions} if positions else {}
     underlyings = list({p.underlying for p in positions})
     market_prices = await get_prices(db, underlyings) if underlyings else {}
-    return positions, strategies, account_names, market_prices
+    earnings_dates = await get_earnings_dates(db, underlyings) if underlyings else {}
+    return positions, strategies, account_names, market_prices, earnings_dates
 
 
 @router.get("/summary")
@@ -62,12 +64,13 @@ async def dashboard_summary(
     if cached is not None:
         return cached
 
-    positions, strategies, account_names, market_prices = await _load_shared_data(
+    positions, strategies, account_names, market_prices, earnings_dates = await _load_shared_data(
         db, account_id, user_account_ids, market=market
     )
     result = _sanitize(
         compute_underlying_exposure(
-            positions, strategies, account_names, market_prices, risk_margin_pct / 100.0
+            positions, strategies, account_names, market_prices, risk_margin_pct / 100.0,
+            earnings_dates=earnings_dates,
         )
     )
     dashboard_summary_cache.set(cache_key, result)
@@ -119,14 +122,15 @@ async def dashboard_summary_multi(
         return results
 
     # Fetch shared data once for all missing percentages
-    positions, strategies, account_names, market_prices = await _load_shared_data(
+    positions, strategies, account_names, market_prices, earnings_dates = await _load_shared_data(
         db, account_id, user_account_ids, market=market
     )
 
     for pct in missing_pcts:
         result = _sanitize(
             compute_underlying_exposure(
-                positions, strategies, account_names, market_prices, pct / 100.0
+                positions, strategies, account_names, market_prices, pct / 100.0,
+                earnings_dates=earnings_dates,
             )
         )
         dashboard_summary_cache.set(cache_keys[pct], result)

@@ -304,6 +304,7 @@ def register_all_callbacks(dash_app):
                             for h in [
                                 "Account",
                                 "Expiry",
+                                "Earnings",
                                 "Strike",
                                 "Right",
                                 "Qty",
@@ -315,9 +316,29 @@ def register_all_callbacks(dash_app):
                     )
                 )
                 pos_rows = []
+
+                # Earnings date is at underlying level — compute display once
+                earnings_raw = e.get("earnings_date")
+
                 for pos in positions:
                     pos_rmp = pos.get("risk_margin_price")
                     pos_rmp_str = f"${pos_rmp:,.2f}" if pos_rmp is not None else "N/A"
+
+                    # Only show earnings if before this position's expiry
+                    earnings_str = ""
+                    earnings_color = TEXT_SECONDARY
+                    if earnings_raw:
+                        try:
+                            earnings_dt = date.fromisoformat(earnings_raw)
+                            expiry_dt = date.fromisoformat(pos.get("expiry", ""))
+                            if earnings_dt <= expiry_dt:
+                                days_to_earnings = (earnings_dt - date.today()).days
+                                earnings_str = f"{earnings_raw} ({days_to_earnings}d)"
+                                if days_to_earnings <= 7:
+                                    earnings_color = ACCENT_WARN
+                        except (ValueError, TypeError):
+                            pass
+
                     pos_rows.append(
                         html.Tr(
                             [
@@ -328,6 +349,10 @@ def register_all_callbacks(dash_app):
                                 html.Td(
                                     pos.get("expiry", ""),
                                     style={"color": TEXT_SECONDARY, "padding": "0.35rem 0.6rem", "fontSize": "0.8rem"},
+                                ),
+                                html.Td(
+                                    earnings_str,
+                                    style={"color": earnings_color, "padding": "0.35rem 0.6rem", "fontSize": "0.8rem"},
                                 ),
                                 html.Td(
                                     str(pos.get("strike", "")),
@@ -1383,11 +1408,52 @@ def register_all_callbacks(dash_app):
         Input("main-tabs", "active_tab"),
         Input("filter-ticker", "value"),
         Input("filter-rating", "value"),
+        Input("filter-min-iv", "value"),
+        Input("filter-min-delta", "value"),
+        Input("filter-max-delta", "value"),
+        Input("filter-min-dte", "value"),
+        Input("filter-max-dte", "value"),
+        Input("filter-min-otm", "value"),
+        Input("filter-min-roc", "value"),
+        Input("filter-max-capital", "value"),
     )
-    def update_screener_table(scan_data, active_tab, ticker, min_rating):
+    def update_screener_table(
+        scan_data, active_tab, ticker, min_rating,
+        min_iv, min_delta, max_delta, min_dte, max_dte, min_otm, min_roc, max_capital,
+    ):
         results = scan_data.get("results", [])
         if not results or active_tab != "suggestions":
             return [], []
+
+        # Client-side filtering by criteria (no re-scan needed)
+        filtered = []
+        for r in results:
+            iv_pct = (r.get("iv") or 0) * 100
+            delta_abs = r.get("delta") or 0
+            dte = r.get("dte") or 0
+            otm = r.get("otm_pct") or 0
+            ann_roc = r.get("ann_roc_pct") or 0
+            capital = r.get("capital_required") or 0
+
+            if min_iv is not None and iv_pct < min_iv:
+                continue
+            if min_delta is not None and delta_abs < min_delta:
+                continue
+            if max_delta is not None and delta_abs > max_delta:
+                continue
+            if min_dte is not None and dte < min_dte:
+                continue
+            if max_dte is not None and dte > max_dte:
+                continue
+            if min_otm is not None and otm < min_otm:
+                continue
+            if min_roc is not None and ann_roc < min_roc:
+                continue
+            if max_capital is not None and capital > max_capital:
+                continue
+            filtered.append(r)
+
+        results = filtered
 
         if ticker:
             results = [r for r in results if r.get("symbol") == ticker]

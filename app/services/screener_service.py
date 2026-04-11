@@ -16,7 +16,6 @@ from app.analysis.option_greeks import (
     calc_otm_pct,
     calc_rating,
     is_strong_fundamentals,
-    passes_filters,
 )
 from app.models.screener import ScreenerResult, ScreenerWatchlist
 from app.schemas.screener import ScanFilters, ScreenerResultOut
@@ -123,6 +122,7 @@ async def scan_watchlist(
     symbols = await get_watchlist(db, user_sub)
     if not symbols:
         return [], []
+
 
     tasks = [_scan_ticker(sym, filters, delay=i * 1.5) for i, sym in enumerate(symbols)]
     tick_results = await asyncio.gather(*tasks)
@@ -266,24 +266,7 @@ def _fetch_and_screen(symbol: str, filters: ScanFilters) -> list[ScreenerResultO
             delta_raw = black_scholes_put_delta(s=price, k=strike, t=time_to_expiry, r=0.05, sigma=iv)
             delta_abs = abs(delta_raw)
 
-            if not passes_filters(
-                iv=iv,
-                delta=delta_abs,
-                dte=dte,
-                otm_pct=otm_pct,
-                ann_roc=ann_roc,
-                capital=capital,
-                max_capital=filters.max_capital,
-                min_iv=filters.min_iv,
-                min_delta=filters.min_delta,
-                max_delta=filters.max_delta,
-                min_dte=filters.min_dte,
-                max_dte=filters.max_dte,
-                min_otm_pct=filters.min_otm_pct,
-                min_ann_roc=filters.min_ann_roc,
-            ):
-                continue
-
+            # Store all valid puts — filtering happens client-side
             rating, label = calc_rating(iv=iv, delta=delta_abs, dte=dte, ann_roc=ann_roc, strong_fundamentals=strong)
 
             results.append(

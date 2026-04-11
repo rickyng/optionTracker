@@ -17,6 +17,7 @@ def compute_underlying_exposure(
     account_names: dict[int, str],
     market_prices: dict[str, float | None],
     risk_factor: float,
+    earnings_dates: dict[str, str | None] | None = None,
 ) -> dict:
     """Compute dashboard summary for a single risk margin percentage.
 
@@ -33,12 +34,15 @@ def compute_underlying_exposure(
             "has_puts": False,
             "market_price": None,
             "price_unavailable": False,
+            "earnings_date": None,
             "positions": [],
         }
     )
 
     for p in positions:
         exp = underlying_exp[p.underlying]
+        if exp["earnings_date"] is None and earnings_dates:
+            exp["earnings_date"] = earnings_dates.get(p.underlying)
         mult = p.multiplier
         qty = abs(p.quantity)
         premium = p.entry_premium

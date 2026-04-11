@@ -141,6 +141,7 @@ def screener_layout():
                                 dcc.Input(
                                     id="filter-min-iv", type="number", value=30, min=0, max=100, style=_input_style()
                                 ),
+                                tooltip="Minimum implied volatility. Higher IV = higher premium income. CSP sellers typically target 30-60% IV.",
                             ),
                             _filter_row(
                                 "Delta Range",
@@ -167,6 +168,7 @@ def screener_layout():
                                         ),
                                     ]
                                 ),
+                                tooltip="Put delta (absolute). Lower delta = more OTM = lower assignment risk. 0.15-0.35 is typical for CSP.",
                             ),
                             _filter_row(
                                 "DTE Range",
@@ -191,18 +193,21 @@ def screener_layout():
                                         ),
                                     ]
                                 ),
+                                tooltip="Days to expiration. Longer DTE = more premium but more exposure. 21-45 days is common for CSP.",
                             ),
                             _filter_row(
                                 "Min OTM %",
                                 dcc.Input(
                                     id="filter-min-otm", type="number", value=5, min=0, max=50, style=_input_style()
                                 ),
+                                tooltip="Minimum distance below current price. More OTM = safer but lower premium. 5-10% is typical.",
                             ),
                             _filter_row(
                                 "Min Ann.ROC %",
                                 dcc.Input(
                                     id="filter-min-roc", type="number", value=12, min=0, max=100, style=_input_style()
                                 ),
+                                tooltip="Minimum annualized return on capital. Target 12%+ to outperform buy-and-hold.",
                             ),
                             _filter_row(
                                 "Max Capital $",
@@ -214,6 +219,7 @@ def screener_layout():
                                     step=1000,
                                     style=_input_style(),
                                 ),
+                                tooltip="Maximum cash required per position (strike x 100). Limits position size for account sizing.",
                             ),
                         ],
                         style={"padding": "0.5rem 0"},
@@ -298,12 +304,21 @@ def _input_style():
     }
 
 
-def _filter_row(label: str, control) -> html.Div:
+def _filter_row(label: str, control, tooltip: str | None = None) -> html.Div:
+    label_style = {
+        "color": TEXT_SECONDARY,
+        "fontSize": "0.8rem",
+        "width": "120px",
+        "minWidth": "120px",
+    }
+    if tooltip:
+        label_style["cursor"] = "help"
+        label_style["textDecoration"] = "underline dotted"
+        label_style["textDecorationColor"] = "rgba(136,146,176,0.4)"
+
     return html.Div(
         [
-            html.Span(
-                label, style={"color": TEXT_SECONDARY, "fontSize": "0.8rem", "width": "120px", "minWidth": "120px"}
-            ),
+            html.Span(label, style=label_style, title=tooltip or ""),
             control,
         ],
         className="d-flex align-items-center mb-1",

@@ -200,7 +200,8 @@ def test_fetch_and_screen_filters_by_dte(mock_yf):
 
 
 @patch("app.services.screener_service.yf")
-def test_fetch_and_screen_low_iv_filtered_out(mock_yf):
+def test_fetch_and_screen_low_iv_stored_without_filter(mock_yf):
+    """Server now stores all puts; filtering happens client-side."""
     import pandas as pd
 
     puts = pd.DataFrame(
@@ -210,7 +211,8 @@ def test_fetch_and_screen_low_iv_filtered_out(mock_yf):
     )
     mock_yf.Ticker.return_value = _make_ticker(puts_data=puts)
     results = _fetch_and_screen("TEST", ScanFilters(min_iv=0.30))
-    assert results == []
+    assert len(results) == 1
+    assert results[0].iv == 0.10
 
 
 @patch("app.services.screener_service.yf")

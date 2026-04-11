@@ -71,6 +71,10 @@ async def import_csv(
     try:
         # Clear old positions so the latest query fully replaces them (atomic: no auto_commit)
         await clear_positions(db, account_id, user_account_ids=user_account_ids, auto_commit=False)
+        # Flush the DELETE so the subsequent SELECT in upsert sees the cleared state.
+        # Required for Turso/libSQL where uncommitted changes may not be visible
+        # within the same session.
+        await db.flush()
         pos_count = await upsert_positions_from_flex(
             db, position_rows, user_account_ids=user_account_ids, auto_commit=False
         )
@@ -117,12 +121,27 @@ async def import_csv(
 
 
 async def _refresh_prices_background(user_account_ids: list[int] | None) -> None:
-    """Background task to refresh prices after import."""
+    """Background task to refresh prices and earnings dates after import."""
     try:
-        from app.database import async_session
-        from app.services.market_price_service import refresh_all_prices
-
-        async with async_session() as db:
-            await refresh_all_prices(db, user_account_ids)
+        await asyncio.gather(
+            _refresh_prices(user_account_ids),
+            _refresh_earnings(user_account_ids),
+        )
     except Exception:
-        logger.exception("Background price refresh failed")
+        logger.exception("Background price/earnings refresh failed")
+
+
+async def _refresh_prices(user_account_ids: list[int] | None) -> None:
+    from app.database import async_session
+    from app.services.market_price_service import refresh_all_prices
+
+    async with async_session() as db:
+        await refresh_all_prices(db, user_account_ids)
+
+
+async def _refresh_earnings(user_account_ids: list[int] | None) -> None:
+    from app.database import async_session
+    from app.services.earnings_service import refresh_all_earnings_dates
+
+    async with async_session() as db:
+        await refresh_all_earnings_dates(db, user_account_ids)
