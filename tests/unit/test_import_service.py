@@ -102,12 +102,22 @@ async def test_import_csv_fx_conversion(mock_fx, mock_clear, mock_upsert, mock_i
 @patch("app.services.import_service.upsert_positions_from_flex", new_callable=AsyncMock)
 @patch("app.services.import_service.clear_positions", new_callable=AsyncMock)
 @patch("app.services.import_service.get_fx_rate", return_value=1.0)
-async def test_import_csv_single_cache_invalidation(mock_fx, mock_clear, mock_upsert, mock_invalidate):
-    """Verify cache is invalidated exactly once per import."""
+async def test_import_csv_flush_and_expunge_after_clear(mock_fx, mock_clear, mock_upsert, mock_invalidate):
+    """Verify flush() and expunge_all() are called after clear_positions.
+
+    This prevents SAWarning: Identity map already had an identity when
+    Turso reconnects during the subsequent upsert.
+    """
     mock_upsert.return_value = 1
 
     db = AsyncMock()
+    db.flush = AsyncMock()
+    db.expunge_all = AsyncMock()
+
     await import_csv(db, _combined_csv(), account_id=1)
 
-    # invalidate_all_caches should be called exactly once (by import_csv)
-    mock_invalidate.assert_called_once()
+    # Verify sequence: clear → flush → expunge_all → upsert
+    mock_clear.assert_called_once()
+    db.flush.assert_called_once()
+    db.expunge_all.assert_called_once()
+    mock_upsert.assert_called_once()
