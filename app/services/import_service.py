@@ -73,8 +73,9 @@ async def import_csv(
         await clear_positions(db, account_id, user_account_ids=user_account_ids, auto_commit=False)
         # Flush the DELETE so the subsequent SELECT in upsert sees the cleared state.
         # Required for Turso/libSQL where uncommitted changes may not be visible
-        # within the same session.
+        # within the same session. Expire all to clear stale objects from identity map.
         await db.flush()
+        db.expire_all()
         pos_count = await upsert_positions_from_flex(
             db, position_rows, user_account_ids=user_account_ids, auto_commit=False
         )
