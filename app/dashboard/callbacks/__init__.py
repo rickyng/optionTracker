@@ -1022,7 +1022,7 @@ def register_all_callbacks(dash_app):
 
         def _fetch_job(job_id):
             try:
-                resp = requests.get(f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=15)
+                resp = requests.get(f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=45)
                 _logger.info("Poll %s: status=%s body=%s", job_id, resp.status_code, resp.text[:200])
                 return job_id, resp.json()
             except Exception as e:

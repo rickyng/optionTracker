@@ -37,6 +37,11 @@ def _is_transient(exc: Exception) -> bool:
     return any(s in msg for s in _TRANSIENT_SUBSTRS)
 
 
+def _backoff_for_attempt(attempt: int) -> float:
+    """Exponential backoff in seconds: 0.5, 1.0, 2.0 for attempts 0, 1, 2."""
+    return 0.5 * (2 ** attempt)
+
+
 def connect(database, **kwargs):
     """Create an async-compatible connection (called inside a greenlet)."""
     sync_conn = await_only(asyncio.to_thread(_sync.connect, database, **kwargs))
@@ -63,11 +68,11 @@ class _AsyncConn:
                     raise
                 _logger.warning("Transient Turso error on commit, attempt %d/3: %s", attempt + 1, exc)
                 try:
-                    self._reconnect()
+                    self._reconnect(_backoff_for_attempt(attempt))
                 except Exception as recon_exc:
                     _logger.warning("Reconnect failed on attempt %d: %s", attempt + 1, recon_exc)
 
-    def _reconnect(self):
+    def _reconnect(self, backoff: float = 0.5):
         """Replace the dead underlying connection with a fresh one."""
         if not self._connect_args:
             _logger.warning("Cannot reconnect: no connect_args stored")
@@ -75,8 +80,8 @@ class _AsyncConn:
         database, kwargs = self._connect_args
         with contextlib.suppress(Exception):
             await_only(asyncio.to_thread(self._conn.close))
-        # Brief backoff before reconnecting to let Turso clean up the dead stream
-        await_only(asyncio.sleep(0.5))
+        # Exponential backoff before reconnecting to let Turso clean up the dead stream
+        await_only(asyncio.sleep(backoff))
         self._conn = await_only(asyncio.to_thread(_sync.connect, database, **kwargs))
         _logger.info("Reconnected to Turso after transient error")
 
@@ -87,7 +92,7 @@ class _AsyncConn:
             if _is_transient(exc):
                 _logger.warning("Transient Turso error on rollback: %s", exc)
                 try:
-                    self._reconnect()
+                    self._reconnect(_backoff_for_attempt(0))
                 except Exception as recon_exc:
                     _logger.warning("Reconnect failed after rollback error: %s", recon_exc)
             else:
@@ -113,7 +118,7 @@ class _AsyncConn:
             if not _is_transient(exc):
                 raise
             _logger.warning("Transient Turso error on conn execute: %s", exc)
-            self._reconnect()
+            self._reconnect(_backoff_for_attempt(0))
             raw_cursor = self._conn.cursor()
             await_only(asyncio.to_thread(raw_cursor.execute, sql, params or ()))
         return _AsyncCursor(raw_cursor, conn=self)
@@ -126,7 +131,7 @@ class _AsyncConn:
             if not _is_transient(exc):
                 raise
             _logger.warning("Transient Turso error on conn executemany: %s", exc)
-            self._reconnect()
+            self._reconnect(_backoff_for_attempt(0))
             raw_cursor = self._conn.cursor()
             await_only(asyncio.to_thread(raw_cursor.executemany, sql, params_seq))
         return _AsyncCursor(raw_cursor, conn=self)
@@ -162,7 +167,7 @@ class _AsyncCursor:
                     raise
                 _logger.warning("Transient Turso error on cursor %s, attempt %d/3: %s", op, attempt + 1, exc)
                 try:
-                    self._conn._reconnect()
+                    self._conn._reconnect(_backoff_for_attempt(attempt))
                     self._cursor = self._conn._conn.cursor()
                 except Exception as recon_exc:
                     _logger.warning("Reconnect failed on cursor attempt %d: %s", attempt + 1, recon_exc)

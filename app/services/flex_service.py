@@ -18,6 +18,10 @@ _running_tasks: set = set()
 # In-memory job tracking: job_id → {account_id, status, error, ...}
 _jobs: dict[str, dict] = {}
 
+# Serialize Flex downloads so only one runs at a time, reducing concurrent
+# Turso pressure and event-loop contention that causes poll timeouts.
+_download_semaphore = asyncio.Semaphore(1)
+
 
 async def trigger_flex_download(
     account_id: int,
@@ -90,6 +94,18 @@ async def _cleanup_job(job_id: str, delay: float = 600) -> None:
 
 
 async def _run_download(
+    job_id: str,
+    account_id: int,
+    token: str,
+    query_id: str,
+    user_account_ids: list[int] | None,
+) -> None:
+    """Execute the full Flex download flow (serialized via semaphore)."""
+    async with _download_semaphore:
+        await _run_download_inner(job_id, account_id, token, query_id, user_account_ids)
+
+
+async def _run_download_inner(
     job_id: str,
     account_id: int,
     token: str,
