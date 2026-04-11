@@ -2,6 +2,7 @@
 
 from dash import dash_table, dcc, html
 
+from app.dashboard.layouts.screener_presets import STRATEGY_PRESETS
 from app.dashboard.tokens import (
     ACCENT_INFO,
     ACCENT_PROFIT,
@@ -114,6 +115,40 @@ def screener_layout():
                                 ],
                                 className="d-flex align-items-center",
                             ),
+                        ],
+                        style={"padding": "0.5rem 0"},
+                    ),
+                ],
+                style={"marginBottom": "1rem"},
+                open=True,
+            ),
+            # Strategy Presets (collapsible)
+            html.Details(
+                [
+                    html.Summary(
+                        "Strategy Presets",
+                        style={
+                            "cursor": "pointer",
+                            "color": TEXT_SECONDARY,
+                            "fontWeight": 600,
+                            "fontSize": "0.85rem",
+                            "marginBottom": "0.5rem",
+                        },
+                    ),
+                    html.Div(
+                        [
+                            dcc.Dropdown(
+                                id="strategy-preset-select",
+                                options=[
+                                    {"label": p["label"], "value": key}
+                                    for key, p in STRATEGY_PRESETS.items()
+                                ],
+                                placeholder="Select a volatility group...",
+                                clearable=True,
+                                style={"fontSize": "0.82rem"},
+                            ),
+                            html.Div(id="strategy-preset-note", className="mt-2"),
+                            html.Div(id="strategy-preset-tickers", className="mt-1"),
                         ],
                         style={"padding": "0.5rem 0"},
                     ),

@@ -1162,6 +1162,73 @@ def register_all_callbacks(dash_app):
 
     # ---- Screener callbacks ----
 
+    # ---- Strategy preset callback ----
+    @dash_app.callback(
+        Output("filter-min-iv", "value"),
+        Output("filter-min-delta", "value"),
+        Output("filter-max-delta", "value"),
+        Output("filter-min-dte", "value"),
+        Output("filter-max-dte", "value"),
+        Output("filter-min-otm", "value"),
+        Output("filter-min-roc", "value"),
+        Output("filter-max-capital", "value"),
+        Output("strategy-preset-note", "children"),
+        Output("strategy-preset-tickers", "children"),
+        Output("filter-ticker", "value"),
+        Input("strategy-preset-select", "value"),
+        prevent_initial_call=True,
+    )
+    def apply_strategy_preset(preset_key):
+        from app.dashboard.layouts.screener_presets import STRATEGY_PRESETS
+
+        if not preset_key:
+            no_update = dash.no_update
+            return (no_update,) * 8 + ([], [], no_update)
+
+        preset = STRATEGY_PRESETS.get(preset_key)
+        if not preset:
+            no_update = dash.no_update
+            return (no_update,) * 8 + ([], [], no_update)
+
+        f = preset["filters"]
+        note = html.Small(
+            preset["note"],
+            style={"color": TEXT_SECONDARY, "fontStyle": "italic", "fontSize": "0.8rem"},
+        )
+        color = preset["color"]
+        tags = [
+            html.Span(
+                ticker,
+                style={
+                    "backgroundColor": BG_CARD_HEADER,
+                    "border": f"1px solid {color}",
+                    "borderRadius": "4px",
+                    "padding": "0.2rem 0.5rem",
+                    "fontSize": "0.8rem",
+                    "color": color,
+                    "marginRight": "0.4rem",
+                    "display": "inline-block",
+                },
+            )
+            for ticker in preset["tickers"]
+        ]
+
+        return (
+            f["min_iv"],
+            f["min_delta"],
+            f["max_delta"],
+            f["min_dte"],
+            f["max_dte"],
+            f["min_otm"],
+            f["min_roc"],
+            f["max_capital"],
+            note,
+            tags,
+            None,
+        )
+
+    # ---- Watchlist callbacks ----
+
     @dash_app.callback(
         Output("screener-watchlist-store", "data"),
         Output("add-symbol-status", "children"),
