@@ -124,7 +124,7 @@ async def scan_watchlist(
     if not symbols:
         return [], []
 
-    tasks = [_scan_ticker(sym, filters) for sym in symbols]
+    tasks = [_scan_ticker(sym, filters, delay=i * 1.5) for i, sym in enumerate(symbols)]
     tick_results = await asyncio.gather(*tasks)
 
     all_results: list[ScreenerResultOut] = []
@@ -171,9 +171,13 @@ async def scan_watchlist(
     return all_results, failed_tickers
 
 
-async def _scan_ticker(symbol: str, filters: ScanFilters) -> tuple[str, list[ScreenerResultOut], str | None]:
+async def _scan_ticker(
+    symbol: str, filters: ScanFilters, delay: float = 0.0
+) -> tuple[str, list[ScreenerResultOut], str | None]:
     """Fetch and screen puts for a single ticker."""
     async with _SEMAPHORE:
+        if delay:
+            await asyncio.sleep(delay)
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, _fetch_and_screen, symbol, filters)
@@ -184,9 +188,15 @@ async def _scan_ticker(symbol: str, filters: ScanFilters) -> tuple[str, list[Scr
 
 def _fetch_and_screen(symbol: str, filters: ScanFilters) -> list[ScreenerResultOut]:
     """Synchronous: fetch yfinance data and screen puts for one ticker."""
-    ticker = yf.Ticker(symbol)
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+    except Exception as e:
+        err_msg = str(e)
+        if "401" in err_msg or "crumb" in err_msg.lower():
+            raise ValueError("Yahoo Finance auth error — try again later") from e
+        raise
 
-    info = ticker.info or {}
     price = info.get("currentPrice") or info.get("regularMarketPrice")
     if not price:
         raise ValueError(f"No price for {symbol}")
@@ -207,7 +217,7 @@ def _fetch_and_screen(symbol: str, filters: ScanFilters) -> list[ScreenerResultO
 
     expirations = ticker.options
     if not expirations:
-        raise ValueError(f"No options for {symbol}")
+        raise ValueError(f"No options data for {symbol}")
 
     today = date.today()
     valid_expirations = []
@@ -229,6 +239,8 @@ def _fetch_and_screen(symbol: str, filters: ScanFilters) -> list[ScreenerResultO
     for exp_str, dte in valid_expirations:
         try:
             chain = ticker.option_chain(exp_str)
+            if chain is None:
+                continue
         except Exception:
             continue
 
