@@ -102,13 +102,11 @@ async def _run_download(
 ) -> None:
     """Execute the full Flex download flow (serialized via semaphore).
 
-    A 3-second pause before releasing the semaphore avoids triggering IBKR
+    A 3-second pause inside the semaphore avoids triggering IBKR
     rate-limiting on back-to-back SendRequest calls.
     """
-    try:
-        async with _download_semaphore:
-            await _run_download_inner(job_id, account_id, token, query_id, user_account_ids)
-    finally:
+    async with _download_semaphore:
+        await _run_download_inner(job_id, account_id, token, query_id, user_account_ids)
         await asyncio.sleep(3)
 
 
