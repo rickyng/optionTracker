@@ -17,12 +17,15 @@ from app.dashboard.layouts.expiration import expiration_layout
 from app.dashboard.layouts.main import make_summary_cards, overview_layout
 from app.dashboard.layouts.positions import positions_layout
 from app.dashboard.layouts.risk import risk_layout
+from app.dashboard.layouts.screener import screener_layout
 from app.dashboard.layouts.settings import settings_layout
 from app.dashboard.tokens import (
+    ACCENT_INFO,
     ACCENT_LOSS,
     ACCENT_PROFIT,
     ACCENT_WARN,
     BG_CARD,
+    BG_CARD_HEADER,
     BG_ROW_ALT,
     BORDER,
     PLOT_LAYOUT,
@@ -83,8 +86,12 @@ def _get_user_headers():
             user = verify_session(cookie)
             if user:
                 headers["X-User-Sub"] = user.sub
-    except Exception:
-        pass
+            else:
+                _logger.warning("Session cookie found but verification failed")
+        else:
+            _logger.debug("No session cookie '%s' in Flask request", SESSION_COOKIE_NAME)
+    except Exception as e:
+        _logger.warning("Failed to extract user from session: %s", e)
     return headers
 
 
@@ -121,6 +128,7 @@ def register_all_callbacks(dash_app):
             "positions": positions_layout,
             "risk": risk_layout,
             "expiration": expiration_layout,
+            "suggestions": screener_layout,
             "settings": settings_layout,
         }
         layout_fn = layouts.get(active_tab, overview_layout)
@@ -401,9 +409,7 @@ def register_all_callbacks(dash_app):
         if not n_clicks:
             return ""
         try:
-            resp = requests.post(
-                f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=120
-            )
+            resp = requests.post(f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=120)
             data = resp.json()
             refreshed = data.get("refreshed", 0)
             failed = data.get("failed", 0)
@@ -933,10 +939,16 @@ def register_all_callbacks(dash_app):
                 resp = requests.post(url, headers=_get_user_headers(), timeout=15)
                 _logger.info("POST response: status=%s body=%s", resp.status_code, resp.text[:500])
                 if not resp.ok:
-                    return {}, [html.Small(
-                        f"API error {resp.status_code}: {resp.text[:200]}",
-                        style={"color": ACCENT_LOSS},
-                    )], True
+                    return (
+                        {},
+                        [
+                            html.Small(
+                                f"API error {resp.status_code}: {resp.text[:200]}",
+                                style={"color": ACCENT_LOSS},
+                            )
+                        ],
+                        True,
+                    )
                 result = resp.json()
                 jobs = result.get("jobs", [])
                 _logger.info("Started %d jobs: %s", len(jobs), [j["job_id"] for j in jobs])
@@ -950,7 +962,9 @@ def register_all_callbacks(dash_app):
                                 dbc.CardBody(
                                     [
                                         html.Strong(j["account_name"], style={"color": TEXT_PRIMARY}),
-                                        html.Span(" — Pending...", style={"color": ACCENT_WARN, "marginLeft": "0.5rem"}),
+                                        html.Span(
+                                            " — Pending...", style={"color": ACCENT_WARN, "marginLeft": "0.5rem"}
+                                        ),
                                     ]
                                 ),
                             ],
@@ -977,13 +991,13 @@ def register_all_callbacks(dash_app):
         fail_counts: dict = (store_data or {}).get("fail_counts", {})
 
         headers = _get_user_headers()
-        _logger.info("Polling %d jobs (attempt %d/%d): %s", len(current_job_ids), attempts, _max_poll_attempts, current_job_ids)
+        _logger.info(
+            "Polling %d jobs (attempt %d/%d): %s", len(current_job_ids), attempts, _max_poll_attempts, current_job_ids
+        )
 
         def _fetch_job(job_id):
             try:
-                resp = requests.get(
-                    f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=15
-                )
+                resp = requests.get(f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=15)
                 _logger.info("Poll %s: status=%s body=%s", job_id, resp.status_code, resp.text[:200])
                 return job_id, resp.json()
             except Exception as e:
@@ -1024,7 +1038,9 @@ def register_all_callbacks(dash_app):
                 )
             elif timed_out:
                 badge = dbc.Badge("Timed Out", color="secondary")
-                detail = html.Small(" — Max poll attempts reached", style={"color": TEXT_SECONDARY, "marginLeft": "0.5rem"})
+                detail = html.Small(
+                    " — Max poll attempts reached", style={"color": TEXT_SECONDARY, "marginLeft": "0.5rem"}
+                )
             else:
                 all_done = False
                 label = {"requesting": "Requesting...", "polling": "Polling..."}.get(status, "Pending...")
@@ -1051,7 +1067,12 @@ def register_all_callbacks(dash_app):
 
         # Stop polling if all done or timed out
         stop = all_done or timed_out
-        new_store = {"ids": current_job_ids, "attempts": attempts, "statuses": last_statuses, "fail_counts": fail_counts}
+        new_store = {
+            "ids": current_job_ids,
+            "attempts": attempts,
+            "statuses": last_statuses,
+            "fail_counts": fail_counts,
+        }
         return new_store, cards, stop
 
     # ---- User Menu callback ----
@@ -1113,3 +1134,368 @@ def register_all_callbacks(dash_app):
             ],
             className="d-flex align-items-center",
         )
+
+    # ---- Screener callbacks ----
+
+    @dash_app.callback(
+        Output("screener-watchlist-store", "data"),
+        Output("add-symbol-status", "children"),
+        Input("main-tabs", "active_tab"),
+        Input("add-symbol-btn", "n_clicks"),
+        Input({"type": "remove-symbol-btn", "index": dash.dependencies.ALL}, "n_clicks"),
+        State("add-symbol-input", "value"),
+        prevent_initial_call=True,
+    )
+    def manage_watchlist(active_tab, add_clicks, remove_clicks, new_symbol):
+        ctx = dash.callback_context
+        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+
+        headers = _get_user_headers()
+        status_msg = ""
+
+        # Remove symbol
+        if "remove-symbol-btn" in triggered:
+            triggered_id = dash.callback_context.triggered_id
+            if isinstance(triggered_id, dict) and triggered_id.get("type") == "remove-symbol-btn":
+                sym = triggered_id["index"]
+                try:
+                    requests.delete(
+                        f"{API_BASE}/api/screener/watchlist/{sym}",
+                        headers=headers,
+                        timeout=5,
+                    )
+                    status_msg = f"Removed {sym}"
+                except Exception as e:
+                    status_msg = f"Failed: {e}"
+
+        # Add symbol
+        elif "add-symbol-btn" in triggered and add_clicks and new_symbol:
+            symbol_upper = new_symbol.strip().upper()
+            if not symbol_upper:
+                status_msg = "Enter a symbol"
+            else:
+                try:
+                    resp = requests.post(
+                        f"{API_BASE}/api/screener/watchlist",
+                        json={"symbol": symbol_upper},
+                        headers=headers,
+                        timeout=5,
+                    )
+                    if resp.ok:
+                        status_msg = f"Added {symbol_upper}"
+                    else:
+                        detail = resp.json().get("detail", resp.text[:50])
+                        status_msg = detail
+                except Exception as e:
+                    status_msg = f"Failed: {e}"
+
+        # Fetch current watchlist
+        try:
+            resp = requests.get(f"{API_BASE}/api/screener/watchlist", headers=headers, timeout=5)
+            data = resp.json()
+            symbols = data.get("symbols", [])
+        except Exception:
+            symbols = []
+
+        return symbols, status_msg
+
+    @dash_app.callback(
+        Output("watchlist-tags", "children"),
+        Input("screener-watchlist-store", "data"),
+    )
+    def render_watchlist_tags(symbols):
+        if not symbols:
+            return []
+        tags = []
+        for sym in symbols:
+            tags.append(
+                html.Span(
+                    [
+                        html.Span(sym, style={"marginRight": "0.3rem"}),
+                        html.Span(
+                            "x",
+                            id={"type": "remove-symbol-btn", "index": sym},
+                            style={
+                                "cursor": "pointer",
+                                "fontWeight": 700,
+                                "fontSize": "0.7rem",
+                                "color": TEXT_SECONDARY,
+                            },
+                        ),
+                    ],
+                    style={
+                        "backgroundColor": BG_CARD_HEADER,
+                        "border": f"1px solid {BORDER}",
+                        "borderRadius": "4px",
+                        "padding": "0.2rem 0.5rem",
+                        "fontSize": "0.8rem",
+                        "color": TEXT_PRIMARY,
+                        "marginRight": "0.4rem",
+                        "display": "inline-block",
+                    },
+                )
+            )
+        return tags
+
+    @dash_app.callback(
+        Output("filter-min-iv", "value"),
+        Output("filter-min-delta", "value"),
+        Output("filter-max-delta", "value"),
+        Output("filter-min-dte", "value"),
+        Output("filter-max-dte", "value"),
+        Output("filter-min-otm", "value"),
+        Output("filter-min-roc", "value"),
+        Output("filter-max-capital", "value"),
+        Input("main-tabs", "active_tab"),
+        State("screener-filters-store", "data"),
+        prevent_initial_call=True,
+    )
+    def restore_filters(active_tab, saved):
+        if active_tab != "suggestions" or not saved:
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+        return (
+            saved.get("min_iv", 30),
+            saved.get("min_delta", 0.15),
+            saved.get("max_delta", 0.35),
+            saved.get("min_dte", 21),
+            saved.get("max_dte", 45),
+            saved.get("min_otm", 5),
+            saved.get("min_roc", 12),
+            saved.get("max_capital", 50000),
+        )
+
+    @dash_app.callback(
+        Output("screener-results-store", "data"),
+        Output("scan-status", "children"),
+        Output("screener-filters-store", "data"),
+        Input("scan-btn", "n_clicks"),
+        State("filter-min-iv", "value"),
+        State("filter-min-delta", "value"),
+        State("filter-max-delta", "value"),
+        State("filter-min-dte", "value"),
+        State("filter-max-dte", "value"),
+        State("filter-min-otm", "value"),
+        State("filter-min-roc", "value"),
+        State("filter-max-capital", "value"),
+        prevent_initial_call=True,
+    )
+    def run_scan(
+        n_clicks,
+        min_iv,
+        min_delta,
+        max_delta,
+        min_dte,
+        max_dte,
+        min_otm,
+        min_roc,
+        max_capital,
+    ):
+        if not n_clicks:
+            return {}, "", dash.no_update
+
+        # Save filter values for restoration on tab switch
+        saved_filters = {
+            "min_iv": min_iv,
+            "min_delta": min_delta,
+            "max_delta": max_delta,
+            "min_dte": min_dte,
+            "max_dte": max_dte,
+            "min_otm": min_otm,
+            "min_roc": min_roc,
+            "max_capital": max_capital,
+        }
+
+        try:
+            payload = {}
+            if min_iv is not None:
+                payload["min_iv"] = min_iv / 100
+            if min_delta is not None:
+                payload["min_delta"] = min_delta
+            if max_delta is not None:
+                payload["max_delta"] = max_delta
+            if min_dte is not None:
+                payload["min_dte"] = min_dte
+            if max_dte is not None:
+                payload["max_dte"] = max_dte
+            if min_otm is not None:
+                payload["min_otm_pct"] = min_otm
+            if min_roc is not None:
+                payload["min_ann_roc"] = min_roc
+            if max_capital is not None:
+                payload["max_capital"] = max_capital
+
+            headers = _get_user_headers()
+            resp = requests.post(
+                f"{API_BASE}/api/screener/scan",
+                json=payload,
+                headers=headers,
+                timeout=120,
+            )
+            data = resp.json()
+            status = f"Found {data.get('opportunities_found', 0)} opportunities"
+            failed = data.get("failed_tickers", [])
+            if failed:
+                status += f" ({len(failed)} failed: {', '.join(failed)})"
+            return data, status, saved_filters
+        except Exception as e:
+            return {}, f"Error: {e}", saved_filters
+
+    @dash_app.callback(
+        Output("screener-summary-cards", "children"),
+        Input("screener-results-store", "data"),
+    )
+    def update_screener_summary(scan_data):
+        results = scan_data.get("results", [])
+        if not results:
+            return html.Small("Click Scan to find CSP opportunities.", style={"color": TEXT_SECONDARY})
+
+        watchlist_count = scan_data.get("watchlist_count", 0)
+        total_capital = sum(r.get("capital_required", 0) for r in results)
+        avg_iv = sum(r.get("iv", 0) for r in results) / len(results) if results else 0
+
+        return dbc.Row(
+            [
+                dbc.Col(kpi_card("Watchlist", str(watchlist_count), ACCENT_INFO), lg=2, sm=6),
+                dbc.Col(kpi_card("Opportunities", str(len(results)), ACCENT_PROFIT), lg=2, sm=6),
+                dbc.Col(kpi_card("Avg IV", f"{avg_iv * 100:.1f}%", ACCENT_WARN), lg=2, sm=6),
+                dbc.Col(kpi_card("Total Capital", fmt_money(total_capital), ACCENT_PROFIT), lg=2, sm=6),
+                dbc.Col(
+                    kpi_card("Scanned", scan_data.get("scanned_at", "")[:19].replace("T", " "), TEXT_SECONDARY),
+                    lg=4,
+                    sm=6,
+                ),
+            ]
+        )
+
+    @dash_app.callback(
+        Output("filter-ticker", "options"),
+        Input("screener-results-store", "data"),
+    )
+    def update_ticker_options(scan_data):
+        results = scan_data.get("results", [])
+        symbols = sorted({r.get("symbol") for r in results if r.get("symbol")})
+        return [{"label": s, "value": s} for s in symbols]
+
+    @dash_app.callback(
+        Output("screener-table", "data"),
+        Output("screener-table", "columns"),
+        Input("screener-results-store", "data"),
+        Input("main-tabs", "active_tab"),
+        Input("filter-ticker", "value"),
+        Input("filter-rating", "value"),
+    )
+    def update_screener_table(scan_data, active_tab, ticker, min_rating):
+        results = scan_data.get("results", [])
+        if not results or active_tab != "suggestions":
+            return [], []
+
+        if ticker:
+            results = [r for r in results if r.get("symbol") == ticker]
+        if min_rating:
+            results = [r for r in results if r.get("rating", 0) >= min_rating]
+
+        cols = [
+            {"name": "Ticker", "id": "symbol"},
+            {"name": "Price", "id": "price", "type": "numeric", "format": {"specifier": ".2f"}},
+            {"name": "Strike", "id": "strike", "type": "numeric", "format": {"specifier": ".2f"}},
+            {"name": "Expiry", "id": "expiry"},
+            {"name": "DTE", "id": "dte", "type": "numeric"},
+            {"name": "Bid", "id": "bid", "type": "numeric", "format": {"specifier": ".2f"}},
+            {"name": "Ann.ROC%", "id": "ann_roc_pct", "type": "numeric", "format": {"specifier": ".1f"}},
+            {"name": "IV", "id": "iv_display"},
+            {"name": "Delta", "id": "delta", "type": "numeric", "format": {"specifier": ".2f"}},
+            {"name": "Rating", "id": "rating_display"},
+        ]
+
+        rows = []
+        for r in results:
+            stars = "\u2605" * r.get("rating", 0)
+            rows.append(
+                {
+                    "symbol": r.get("symbol"),
+                    "price": r.get("price"),
+                    "strike": r.get("strike"),
+                    "expiry": r.get("expiry"),
+                    "dte": r.get("dte"),
+                    "bid": r.get("bid"),
+                    "ann_roc_pct": r.get("ann_roc_pct"),
+                    "iv_display": f"{r.get('iv', 0) * 100:.1f}%",
+                    "delta": r.get("delta"),
+                    "rating": r.get("rating"),
+                    "rating_display": f"{stars} {r.get('rating_label', '')}",
+                    "_full": r,
+                }
+            )
+
+        return rows, cols
+
+    @dash_app.callback(
+        Output("screener-detail-panel", "children"),
+        Output("screener-detail-panel", "style"),
+        Input("screener-table", "active_cell"),
+        State("screener-table", "data"),
+    )
+    def show_detail(active_cell, table_data):
+        if not active_cell or not table_data:
+            return html.Div(), {"display": "none"}
+
+        row_idx = active_cell.get("row")
+        if row_idx is None or row_idx >= len(table_data):
+            return html.Div(), {"display": "none"}
+
+        r = table_data[row_idx].get("_full", {})
+
+        detail_style = {
+            "backgroundColor": BG_CARD,
+            "border": f"1px solid {BORDER}",
+            "borderRadius": "8px",
+            "padding": "1rem",
+            "marginTop": "0.5rem",
+        }
+
+        def _metric(label, value):
+            return html.Div(
+                [
+                    html.Div(
+                        label, style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase"}
+                    ),
+                    html.Div(str(value), style={"color": TEXT_PRIMARY, "fontSize": "0.9rem", "fontWeight": 600}),
+                ],
+                style={"marginRight": "1.5rem"},
+            )
+
+        fund_badge = ""
+        if r.get("strong_fundamentals"):
+            fund_badge = html.Span(
+                " \u2605 Strong Fundamentals",
+                style={"color": ACCENT_PROFIT, "fontSize": "0.8rem", "marginLeft": "0.5rem"},
+            )
+
+        return html.Div(
+            [
+                html.Div(
+                    [
+                        html.Strong(
+                            f"{r.get('symbol')} ${r.get('strike')}P", style={"color": TEXT_PRIMARY, "fontSize": "1rem"}
+                        ),
+                        html.Span(f" exp {r.get('expiry')}", style={"color": TEXT_SECONDARY}),
+                        fund_badge,
+                    ],
+                    style={"marginBottom": "0.75rem"},
+                ),
+                html.Div(
+                    [
+                        _metric("Mid", f"${r.get('mid', 0):.2f}"),
+                        _metric("OTM%", f"{r.get('otm_pct', 0):.1f}%"),
+                        _metric("Capital", fmt_money(r.get("capital_required", 0))),
+                        _metric("P/E", f"{r.get('pe_ratio', 'N/A')}" if r.get("pe_ratio") else "N/A"),
+                        _metric("Beta", f"{r.get('beta', 'N/A')}" if r.get("beta") else "N/A"),
+                        _metric("Margin", f"{r.get('profit_margin', 0):.1f}%" if r.get("profit_margin") else "N/A"),
+                        _metric(
+                            "Rev Growth", f"{r.get('revenue_growth', 0):.1f}%" if r.get("revenue_growth") else "N/A"
+                        ),
+                    ],
+                    className="d-flex flex-wrap",
+                ),
+            ]
+        ), detail_style

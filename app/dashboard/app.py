@@ -172,6 +172,9 @@ def create_dash_app(fastapi_app):
                     dcc.Store(id="accounts-store", data=[]),
                     dcc.Store(id="user-store", data={}),
                     dcc.Store(id="positions-store", data=[]),
+                    dcc.Store(id="screener-results-store", data={}),
+                    dcc.Store(id="screener-watchlist-store", data=[]),
+                    dcc.Store(id="screener-filters-store", data={}),
                     dcc.Interval(id="sync-poll-interval", interval=2000, disabled=True),
                     dcc.Interval(id="boot-interval", interval=100, max_intervals=1, disabled=False),
                     dbc.Tabs(
@@ -180,6 +183,7 @@ def create_dash_app(fastapi_app):
                             dbc.Tab(label="Positions", tab_id="positions"),
                             dbc.Tab(label="Risk", tab_id="risk"),
                             dbc.Tab(label="Expiration", tab_id="expiration"),
+                            dbc.Tab(label="Suggestions", tab_id="suggestions"),
                             dbc.Tab(label="Settings", tab_id="settings"),
                         ],
                         id="main-tabs",
