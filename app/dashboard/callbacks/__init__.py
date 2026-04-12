@@ -434,7 +434,7 @@ def register_all_callbacks(dash_app):
         if not n_clicks:
             return ""
         try:
-            resp = requests.post(f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=120)
+            resp = requests.post(f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=180)
             data = resp.json()
             refreshed = data.get("refreshed", 0)
             failed = data.get("failed", 0)
@@ -1356,11 +1356,16 @@ def register_all_callbacks(dash_app):
             saved.get("max_capital", 50000),
         )
 
+    _max_scan_poll_attempts = 60
+
     @dash_app.callback(
-        Output("screener-results-store", "data"),
+        Output("scan-job-store", "data"),
         Output("scan-status", "children"),
+        Output("scan-poll-interval", "disabled"),
         Output("screener-filters-store", "data"),
+        Output("screener-results-store", "data"),
         Input("scan-btn", "n_clicks"),
+        Input("scan-poll-interval", "n_intervals"),
         State("filter-min-iv", "value"),
         State("filter-min-delta", "value"),
         State("filter-max-delta", "value"),
@@ -1369,10 +1374,12 @@ def register_all_callbacks(dash_app):
         State("filter-min-otm", "value"),
         State("filter-min-roc", "value"),
         State("filter-max-capital", "value"),
+        State("scan-job-store", "data"),
         prevent_initial_call=True,
     )
-    def run_scan(
+    def handle_scan(
         n_clicks,
+        n_intervals,
         min_iv,
         min_delta,
         max_delta,
@@ -1381,9 +1388,10 @@ def register_all_callbacks(dash_app):
         min_otm,
         min_roc,
         max_capital,
+        store_data,
     ):
-        if not n_clicks:
-            return {}, "", dash.no_update
+        ctx = dash.callback_context
+        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
 
         # Save filter values for restoration on tab switch
         saved_filters = {
@@ -1397,7 +1405,8 @@ def register_all_callbacks(dash_app):
             "max_capital": max_capital,
         }
 
-        try:
+        # Case 1: Button click — trigger scan
+        if triggered == "scan-btn.n_clicks" and n_clicks:
             payload = {}
             if min_iv is not None:
                 payload["min_iv"] = min_iv / 100
@@ -1416,21 +1425,90 @@ def register_all_callbacks(dash_app):
             if max_capital is not None:
                 payload["max_capital"] = max_capital
 
-            headers = _get_user_headers()
-            resp = requests.post(
-                f"{API_BASE}/api/screener/scan",
-                json=payload,
-                headers=headers,
-                timeout=120,
+            try:
+                resp = requests.post(
+                    f"{API_BASE}/api/screener/scan",
+                    json=payload,
+                    headers=_get_user_headers(),
+                    timeout=15,
+                )
+                data = resp.json()
+                job_id = data.get("job_id")
+                if not job_id:
+                    return {}, "No job started", True, saved_filters, dash.no_update
+                return (
+                    {"job_id": job_id, "attempts": 0},
+                    f"Starting scan ({data.get('watchlist_count', '?')} tickers)...",
+                    False,
+                    saved_filters,
+                    dash.no_update,
+                )
+            except Exception as e:
+                return {}, f"Error: {e}", True, saved_filters, dash.no_update
+
+        # Case 2: Interval tick — poll for status
+        store = store_data or {}
+        job_id = store.get("job_id")
+        if not job_id:
+            return dash.no_update, dash.no_update, True, dash.no_update
+
+        attempts = store.get("attempts", 0) + 1
+        timed_out = attempts >= _max_scan_poll_attempts
+
+        try:
+            resp = requests.get(
+                f"{API_BASE}/api/screener/scan/{job_id}",
+                headers=_get_user_headers(),
+                timeout=45,
             )
             data = resp.json()
-            status = f"Found {data.get('opportunities_found', 0)} opportunities"
-            failed = data.get("failed_tickers", [])
-            if failed:
-                status += f" ({len(failed)} failed: {', '.join(failed)})"
-            return data, status, saved_filters
         except Exception as e:
-            return {}, f"Error: {e}", saved_filters
+            if timed_out:
+                return store, f"Timed out: {e}", True, saved_filters, dash.no_update
+            store["attempts"] = attempts
+            return store, f"Poll failed, retrying ({attempts})...", dash.no_update, saved_filters, dash.no_update
+
+        status = data.get("status", "unknown")
+        progress = data.get("progress", "")
+        current_ticker = data.get("current_ticker") or ""
+
+        if status == "completed":
+            results = data.get("results", [])
+            failed = data.get("failed_tickers", [])
+            scan_data = {"results": results}
+            # Inject summary fields for update_screener_summary
+            results_count = len(results)
+            total_capital = sum(r.get("capital_required", 0) for r in results)
+            avg_iv = sum(r.get("iv", 0) for r in results) / results_count if results_count else 0
+            scan_data["watchlist_count"] = data.get("total_tickers", 0)
+            scan_data["opportunities_found"] = results_count
+            scan_data["failed_tickers"] = failed
+            scan_data["avg_iv"] = avg_iv
+            scan_data["total_capital"] = total_capital
+            scan_data["scanned_at"] = ""
+
+            status_text = f"Found {results_count} opportunities"
+            if failed:
+                status_text += f" ({len(failed)} failed: {', '.join(failed)})"
+            return (
+                {"job_id": job_id, "attempts": attempts, "results": scan_data},
+                status_text,
+                True,
+                saved_filters,
+                scan_data,
+            )
+
+        if status == "failed":
+            error = data.get("error", "Unknown error")
+            return store, f"Scan failed: {error}", True, saved_filters, dash.no_update
+
+        if timed_out:
+            return store, "Scan timed out", True, saved_filters, dash.no_update
+
+        # Still running
+        ticker_info = f" ({current_ticker})" if current_ticker else ""
+        store["attempts"] = attempts
+        return store, f"Scanning{ticker_info} {progress}...", dash.no_update, saved_filters, dash.no_update
 
     @dash_app.callback(
         Output("screener-summary-cards", "children"),

@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
@@ -75,3 +77,9 @@ async def health():
     async with async_session() as session:
         await session.execute(text("SELECT 1"))
     return {"status": "ok", "db": "connected"}
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    icon = Path(__file__).parent / "dashboard" / "assets" / "icons" / "favicon.ico"
+    return FileResponse(icon, media_type="image/x-icon")

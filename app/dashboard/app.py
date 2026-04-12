@@ -175,7 +175,9 @@ def create_dash_app(fastapi_app):
                     dcc.Store(id="screener-results-store", data={}),
                     dcc.Store(id="screener-watchlist-store", data=[]),
                     dcc.Store(id="screener-filters-store", data={}),
+                    dcc.Store(id="scan-job-store", data={}),
                     dcc.Interval(id="sync-poll-interval", interval=5000, disabled=True),
+                    dcc.Interval(id="scan-poll-interval", interval=5000, disabled=True),
                     dcc.Interval(id="boot-interval", interval=100, max_intervals=1, disabled=False),
                     dbc.Tabs(
                         [

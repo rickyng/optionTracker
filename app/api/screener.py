@@ -14,9 +14,10 @@ from app.schemas.screener import ScanFilters, ScanResponse, ScreenerResultOut, W
 from app.services.screener_service import (
     add_symbol,
     get_latest_results,
+    get_scan_job_status,
     get_watchlist,
     remove_symbol,
-    scan_watchlist,
+    trigger_scan_job,
 )
 
 _logger = logging.getLogger(__name__)
@@ -67,27 +68,35 @@ async def remove_watchlist_symbol(
 
 
 @router.post("/scan")
-async def run_scan(
+async def start_scan(
     request: Request,
     db: AsyncSession = Depends(get_db),
     filters: ScanFilters = ScanFilters(),
 ):
+    """Start a background scan job. Returns job_id immediately."""
     user_sub = _user_sub(request)
-    watchlist_symbols = await get_watchlist(db, user_sub)
-    results, failed = await scan_watchlist(db, user_sub, filters)
+    symbols = await get_watchlist(db, user_sub)
+    if not symbols:
+        return ScanResponse(
+            scanned_at=datetime.now(UTC).isoformat(),
+            watchlist_count=0,
+            opportunities_found=0,
+            failed_tickers=[],
+            avg_iv=0.0,
+            total_capital=0.0,
+            results=[],
+        )
+    job_id = await trigger_scan_job(db, user_sub, filters, symbols)
+    return {"job_id": job_id, "watchlist_count": len(symbols)}
 
-    total_capital = sum(r.capital_required for r in results)
-    avg_iv = sum(r.iv for r in results) / len(results) if results else 0.0
 
-    return ScanResponse(
-        scanned_at=datetime.now(UTC).isoformat(),
-        watchlist_count=len(watchlist_symbols),
-        opportunities_found=len(results),
-        failed_tickers=failed,
-        avg_iv=round(avg_iv, 4),
-        total_capital=total_capital,
-        results=results,
-    )
+@router.get("/scan/{job_id}")
+async def scan_job_status(job_id: str):
+    """Poll scan job status. No DB session needed — reads from in-memory job."""
+    job = get_scan_job_status(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @router.get("/results")

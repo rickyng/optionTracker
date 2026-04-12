@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import date
 
 import yfinance as yf
@@ -22,7 +23,14 @@ from app.schemas.screener import ScanFilters, ScreenerResultOut
 
 _logger = logging.getLogger(__name__)
 
+# Concurrency for yfinance calls within a single scan
 _SEMAPHORE = asyncio.Semaphore(3)
+
+# Keep strong references to background tasks so they aren't garbage-collected
+_running_tasks: set = set()
+
+# In-memory job tracking: job_id → {user_sub, status, progress, ...}
+_scan_jobs: dict[str, dict] = {}
 
 DEFAULT_WATCHLIST = [
     "ADBE",
@@ -124,7 +132,7 @@ async def scan_watchlist(
         return [], []
 
 
-    tasks = [_scan_ticker(sym, filters, delay=i * 1.5) for i, sym in enumerate(symbols)]
+    tasks = [_scan_ticker(sym, filters, delay=i * 0.5) for i, sym in enumerate(symbols)]
     tick_results = await asyncio.gather(*tasks)
 
     all_results: list[ScreenerResultOut] = []
@@ -176,8 +184,6 @@ async def _scan_ticker(
 ) -> tuple[str, list[ScreenerResultOut], str | None]:
     """Fetch and screen puts for a single ticker."""
     async with _SEMAPHORE:
-        if delay:
-            await asyncio.sleep(delay)
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, _fetch_and_screen, symbol, filters)
@@ -295,3 +301,149 @@ def _fetch_and_screen(symbol: str, filters: ScanFilters) -> list[ScreenerResultO
 
     results.sort(key=lambda r: r.ann_roc_pct, reverse=True)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Background Job System (mirrors Flex download pattern)
+# ---------------------------------------------------------------------------
+
+
+async def trigger_scan_job(
+    db: AsyncSession,
+    user_sub: str,
+    filters: ScanFilters,
+    symbols: list[str],
+) -> str:
+    """Start a background scan job. Returns job_id immediately."""
+    job_id = str(uuid.uuid4())[:8]
+    _scan_jobs[job_id] = {
+        "user_sub": user_sub,
+        "status": "pending",
+        "progress": f"0/{len(symbols)}",
+        "current_ticker": None,
+        "error": None,
+        "results": [],
+        "failed_tickers": [],
+        "total_tickers": len(symbols),
+    }
+
+    task = asyncio.create_task(_run_scan_background(job_id, user_sub, filters, symbols))
+    _running_tasks.add(task)
+    task.add_done_callback(_running_tasks.discard)
+    return job_id
+
+
+def get_scan_job_status(job_id: str) -> dict | None:
+    """Get scan job status as a dict, or None if not found."""
+    job = _scan_jobs.get(job_id)
+    if not job:
+        return None
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "current_ticker": job["current_ticker"],
+        "error": job["error"],
+        "results": job["results"],
+        "failed_tickers": job["failed_tickers"],
+        "total_tickers": job["total_tickers"],
+    }
+
+
+def _update_scan_job(job_id: str, **kwargs) -> None:
+    """Update in-memory job entry."""
+    job = _scan_jobs.get(job_id)
+    if not job:
+        return
+    job.update(kwargs)
+
+
+async def _cleanup_scan_job(job_id: str, delay: float = 600) -> None:
+    """Remove completed job after a delay so the client can still poll."""
+    await asyncio.sleep(delay)
+    _scan_jobs.pop(job_id, None)
+
+
+async def _run_scan_background(
+    job_id: str,
+    user_sub: str,
+    filters: ScanFilters,
+    symbols: list[str],
+) -> None:
+    """Execute the scan in background, updating progress per ticker."""
+    from app.database import async_session
+
+    try:
+        _update_scan_job(job_id, status="running")
+
+        all_results: list[ScreenerResultOut] = []
+        failed_tickers: list[str] = []
+
+        for i, symbol in enumerate(symbols):
+            _update_scan_job(
+                job_id,
+                progress=f"{i + 1}/{len(symbols)}",
+                current_ticker=symbol,
+            )
+
+            _, ticker_results, error = await _scan_ticker(symbol, filters)
+            if error:
+                failed_tickers.append(symbol)
+                _logger.warning("Scan failed for %s: %s", symbol, error)
+            else:
+                all_results.extend(ticker_results)
+
+        # Store results in database
+        async with async_session() as db:
+            await db.execute(delete(ScreenerResult).where(ScreenerResult.user_sub == user_sub))
+            await db.flush()
+
+            for r in all_results:
+                db.add(
+                    ScreenerResult(
+                        user_sub=user_sub,
+                        symbol=r.symbol,
+                        price=r.price,
+                        strike=r.strike,
+                        expiry=r.expiry,
+                        dte=r.dte,
+                        bid=r.bid,
+                        mid=r.mid,
+                        iv=r.iv,
+                        delta=r.delta,
+                        otm_pct=r.otm_pct,
+                        ann_roc_pct=r.ann_roc_pct,
+                        capital_required=r.capital_required,
+                        pe_ratio=r.pe_ratio,
+                        beta=r.beta,
+                        profit_margin=r.profit_margin,
+                        revenue_growth=r.revenue_growth,
+                        strong_fundamentals=r.strong_fundamentals,
+                        rating=r.rating,
+                        rating_label=r.rating_label,
+                    )
+                )
+            await db.commit()
+
+        # Convert results to dict for JSON serialization in job status
+        results_dicts = [r.model_dump() for r in all_results]
+
+        _update_scan_job(
+            job_id,
+            status="completed",
+            progress=f"{len(symbols)}/{len(symbols)}",
+            current_ticker=None,
+            results=results_dicts,
+            failed_tickers=failed_tickers,
+        )
+
+        # Schedule cleanup
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_cleanup_scan_job(job_id))
+        except RuntimeError:
+            pass
+
+    except Exception as e:
+        _logger.exception("_run_scan_background failed for job %s", job_id)
+        _update_scan_job(job_id, status="failed", error=str(e))
