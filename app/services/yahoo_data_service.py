@@ -36,7 +36,7 @@ def _is_fresh_today(updated_at_str: str | None) -> bool:
         return False
     try:
         ts = datetime.fromisoformat(updated_at_str)
-        return ts.date() >= date.utcnow()
+        return ts.date() >= datetime.now(UTC).date()
     except (ValueError, TypeError):
         return False
 
