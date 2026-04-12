@@ -1450,7 +1450,7 @@ def register_all_callbacks(dash_app):
         store = store_data or {}
         job_id = store.get("job_id")
         if not job_id:
-            return dash.no_update, dash.no_update, True, dash.no_update
+            return dash.no_update, dash.no_update, True, dash.no_update, dash.no_update
 
         attempts = store.get("attempts", 0) + 1
         timed_out = attempts >= _max_scan_poll_attempts

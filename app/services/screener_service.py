@@ -198,10 +198,15 @@ def _fetch_and_screen(symbol: str, filters: ScanFilters) -> list[ScreenerResultO
         ticker = yf.Ticker(symbol)
         info = ticker.info or {}
     except Exception as e:
-        err_msg = str(e)
-        if "401" in err_msg or "crumb" in err_msg.lower():
+        err_msg = str(e).lower()
+        if "401" in err_msg or "crumb" in err_msg:
             raise ValueError("Yahoo Finance auth error — try again later") from e
+        if "429" in err_msg or "rate" in err_msg or "too many" in err_msg:
+            raise ValueError("Rate limited by Yahoo Finance — try again later") from e
         raise
+
+    if not info:
+        raise ValueError(f"No data returned for {symbol}")
 
     price = info.get("currentPrice") or info.get("regularMarketPrice")
     if not price:
@@ -385,6 +390,10 @@ async def _run_scan_background(
                 progress=f"{i + 1}/{len(symbols)}",
                 current_ticker=symbol,
             )
+
+            # Space out requests to avoid yfinance rate limiting
+            if i > 0:
+                await asyncio.sleep(1.5)
 
             _, ticker_results, error = await _scan_ticker(symbol, filters)
             if error:
