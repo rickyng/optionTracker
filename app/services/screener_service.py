@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import date
 
@@ -18,19 +19,22 @@ from app.analysis.option_greeks import (
     calc_rating,
     is_strong_fundamentals,
 )
+from app.models.market_price import MarketPrice
 from app.models.screener import ScreenerResult, ScreenerWatchlist
 from app.schemas.screener import ScanFilters, ScreenerResultOut
 
 _logger = logging.getLogger(__name__)
-
-# Concurrency for yfinance calls within a single scan
-_SEMAPHORE = asyncio.Semaphore(3)
 
 # Keep strong references to background tasks so they aren't garbage-collected
 _running_tasks: set = set()
 
 # In-memory job tracking: job_id → {user_sub, status, progress, ...}
 _scan_jobs: dict[str, dict] = {}
+
+# Global rate limit backoff state
+_last_rate_limit_time: float = 0.0
+_cooldown_applied_time: float = 0.0  # when we last waited for cooldown
+_RATE_LIMIT_COOLDOWN = 30.0  # seconds to pause after any 429
 
 DEFAULT_WATCHLIST = [
     "ADBE",
@@ -131,8 +135,7 @@ async def scan_watchlist(
     if not symbols:
         return [], []
 
-
-    tasks = [_scan_ticker_with_retry(sym, filters) for i, sym in enumerate(symbols)]
+    tasks = [_scan_ticker_with_retry(sym, filters) for sym in symbols]
     tick_results = await asyncio.gather(*tasks)
 
     all_results: list[ScreenerResultOut] = []
@@ -185,20 +188,27 @@ async def _scan_ticker_with_retry(
     cached_info: dict | None = None,
     max_retries: int = 3,
 ) -> tuple[str, list[ScreenerResultOut], str | None]:
-    """Fetch and screen puts for a single ticker, with retry on rate-limit."""
+    """Fetch and screen puts for a single ticker, with retry on rate-limit.
+
+    Returns (symbol, results, error).
+    """
+    global _last_rate_limit_time
+
     for attempt in range(max_retries + 1):
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, _fetch_and_screen, symbol, filters, cached_info)
             return symbol, result, None
         except Exception as e:
             err_msg = str(e).lower()
             is_rate_limit = "rate" in err_msg or "429" in err_msg or "too many" in err_msg
-            if is_rate_limit and attempt < max_retries:
-                backoff = 5 * (2 ** attempt)  # 5s, 10s, 20s
-                _logger.warning("Rate limited on %s, retry %d/%d in %ds", symbol, attempt + 1, max_retries, backoff)
-                await asyncio.sleep(backoff)
-                continue
+            if is_rate_limit:
+                _last_rate_limit_time = time.time()
+                if attempt < max_retries:
+                    backoff = 5 * (2**attempt)  # 5s, 10s, 20s
+                    _logger.warning("Rate limited on %s, retry %d/%d in %ds", symbol, attempt + 1, max_retries, backoff)
+                    await asyncio.sleep(backoff)
+                    continue
             return symbol, [], str(e)
 
 
@@ -284,7 +294,11 @@ def _fetch_and_screen(
 
     results: list[ScreenerResultOut] = []
 
-    for exp_str, dte in valid_expirations:
+    for i, (exp_str, dte) in enumerate(valid_expirations):
+        # Space out yfinance calls to avoid rate limiting
+        if i > 0:
+            time.sleep(1.5)
+
         try:
             chain = ticker.option_chain(exp_str)
             if chain is None:
@@ -418,20 +432,25 @@ async def _run_scan_background(
     try:
         _update_scan_job(job_id, status="running")
 
+        # Reset global rate limit state for this scan job
+        global _last_rate_limit_time, _cooldown_applied_time
+        _last_rate_limit_time = 0.0
+        _cooldown_applied_time = 0.0
+
         # Load cached fundamentals from YahooDataService (avoids redundant yfinance calls)
         cached_fundamentals: dict[str, dict] = {}
         async with async_session() as db:
             from app.services.yahoo_data_service import refresh_if_stale
 
-            await refresh_if_stale(db, symbols)
-            # Read cached data for screener use
-            from sqlalchemy import select
+            # refresh_if_stale returns {symbol: {price, pe_ratio, beta, profit_margin, revenue_growth}}
+            fetched_data = await refresh_if_stale(db, symbols)
+            cached_fundamentals.update(fetched_data)
 
-            from app.models.market_price import MarketPrice
-
+            # For already-fresh symbols not in fetched_data, read price from DB
             result = await db.execute(select(MarketPrice).where(MarketPrice.symbol.in_(symbols)))
             for row in result.scalars().all():
-                cached_fundamentals[row.symbol] = {"price": row.price}
+                if row.symbol not in cached_fundamentals:
+                    cached_fundamentals[row.symbol] = {"price": row.price}
 
         all_results: list[ScreenerResultOut] = []
         failed_tickers: list[str] = []
@@ -443,12 +462,28 @@ async def _run_scan_background(
                 current_ticker=symbol,
             )
 
+            # Check for global rate limit backoff (only wait once per cooldown window)
+            time_since_rate_limit = time.time() - _last_rate_limit_time
+            if (
+                _last_rate_limit_time > 0
+                and time_since_rate_limit < _RATE_LIMIT_COOLDOWN
+                and _cooldown_applied_time < _last_rate_limit_time
+            ):
+                wait_time = _RATE_LIMIT_COOLDOWN - time_since_rate_limit
+                _logger.info("Global rate limit backoff: waiting %.1fs before %s", wait_time, symbol)
+                _update_scan_job(job_id, status="rate_limited")
+                await asyncio.sleep(wait_time)
+                _cooldown_applied_time = time.time()
+                _update_scan_job(job_id, status="running")
+
             # Space out requests to avoid yfinance rate limiting
             if i > 0:
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
 
             cached_info = cached_fundamentals.get(symbol)
-            _, ticker_results, error = await _scan_ticker_with_retry(symbol, filters, cached_info=cached_info)
+            _, ticker_results, error = await _scan_ticker_with_retry(
+                symbol, filters, cached_info=cached_info
+            )
             if error:
                 failed_tickers.append(symbol)
                 _logger.warning("Scan failed for %s: %s", symbol, error)
