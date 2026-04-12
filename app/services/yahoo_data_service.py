@@ -129,15 +129,24 @@ async def _fetch_ticker_info(symbol: str) -> dict | None:
 
 
 def _get_ticker_info(lookup: str) -> dict | None:
-    """Synchronous: fetch ticker.info from yfinance."""
-    try:
-        ticker = yf.Ticker(lookup)
-        info = ticker.info
-        if not info:
+    """Synchronous: fetch ticker.info from yfinance with crumb-refresh retry."""
+    for attempt in range(2):  # Try twice: original + one refresh retry
+        try:
+            ticker = yf.Ticker(lookup)
+            info = ticker.info
+            if not info:
+                return None
+            return info
+        except Exception as e:
+            err_msg = str(e).lower()
+            # "Invalid Crumb" or 401 means Yahoo auth expired — retry with fresh session
+            is_crumb_error = "crumb" in err_msg or "401" in err_msg or "unauthorized" in err_msg
+            if is_crumb_error and attempt == 0:
+                logger.warning("Yahoo crumb expired for %s, retrying with fresh session", lookup)
+                continue  # Force new Ticker (fresh session) on retry
+            logger.warning("yfinance fetch failed for %s: %s", lookup, e)
             return None
-        return info
-    except Exception:
-        return None
+    return None
 
 
 async def _upsert_price(db: AsyncSession, symbol: str, data: dict) -> None:

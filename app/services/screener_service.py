@@ -252,11 +252,18 @@ def _fetch_and_screen(
             info = ticker.info or {}
         except Exception as e:
             err_msg = str(e).lower()
-            if "401" in err_msg or "crumb" in err_msg:
-                raise ValueError("Yahoo Finance auth error — try again later") from e
-            if "429" in err_msg or "rate" in err_msg or "too many" in err_msg:
+            # Crumb/auth errors — retry once with fresh session
+            if "crumb" in err_msg or ("401" in err_msg and "unauthorized" in err_msg):
+                _logger.warning("Yahoo crumb expired for %s, retrying with fresh session", symbol)
+                try:
+                    ticker = yf.Ticker(symbol)
+                    info = ticker.info or {}
+                except Exception as retry_e:
+                    raise ValueError("Yahoo Finance auth error") from retry_e
+            elif "429" in err_msg or "rate" in err_msg or "too many" in err_msg:
                 raise ValueError("Rate limited by Yahoo Finance — try again later") from e
-            raise
+            else:
+                raise
 
         if not info:
             raise ValueError(f"No data returned for {symbol}")

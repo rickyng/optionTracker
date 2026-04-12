@@ -150,15 +150,21 @@ def _fetch_earnings_for_symbol(symbol: str) -> str | None:
     from app.services.price_service import _yahoo_lookup_symbol
 
     lookup = _yahoo_lookup_symbol(symbol)
-    try:
-        ticker = yf.Ticker(lookup)
-        info = ticker.info or {}
+    for attempt in range(2):  # Try twice: original + crumb-refresh retry
+        try:
+            ticker = yf.Ticker(lookup)
+            info = ticker.info or {}
 
-        ts = info.get("earningsTimestamp")
-        if ts:
-            return date.fromtimestamp(ts).isoformat()
+            ts = info.get("earningsTimestamp")
+            if ts:
+                return date.fromtimestamp(ts).isoformat()
 
-        return None
-    except Exception as e:
-        logger.warning("yfinance earnings fetch failed for %s (%s): %s", symbol, lookup, e)
-        return None
+            return None
+        except Exception as e:
+            err_msg = str(e).lower()
+            if ("crumb" in err_msg or "401" in err_msg or "unauthorized" in err_msg) and attempt == 0:
+                logger.warning("Yahoo crumb expired for %s (%s), retrying", symbol, lookup)
+                continue
+            logger.warning("yfinance earnings fetch failed for %s (%s): %s", symbol, lookup, e)
+            return None
+    return None

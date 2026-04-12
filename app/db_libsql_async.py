@@ -39,7 +39,7 @@ def _is_transient(exc: Exception) -> bool:
 
 def _backoff_for_attempt(attempt: int) -> float:
     """Exponential backoff in seconds: 0.5, 1.0, 2.0 for attempts 0, 1, 2. Capped at 2s."""
-    return min(0.5 * (2 ** attempt), 2.0)
+    return min(0.5 * (2**attempt), 2.0)
 
 
 def connect(database, **kwargs):
@@ -66,7 +66,7 @@ class _AsyncConn:
             except Exception as exc:
                 if not _is_transient(exc) or attempt >= 2:
                     raise
-                _logger.warning("Transient Turso error on commit, attempt %d/3: %s", attempt + 1, exc)
+                _logger.debug("Transient Turso error on commit, attempt %d/3: %s", attempt + 1, exc)
                 try:
                     self._reconnect(_backoff_for_attempt(attempt))
                 except Exception as recon_exc:
@@ -90,7 +90,7 @@ class _AsyncConn:
             await_only(asyncio.to_thread(self._conn.rollback))
         except Exception as exc:
             if _is_transient(exc):
-                _logger.warning("Transient Turso error on rollback: %s", exc)
+                _logger.debug("Transient Turso error on rollback: %s", exc)
                 try:
                     self._reconnect(_backoff_for_attempt(0))
                 except Exception as recon_exc:
@@ -117,7 +117,7 @@ class _AsyncConn:
         except Exception as exc:
             if not _is_transient(exc):
                 raise
-            _logger.warning("Transient Turso error on conn execute: %s", exc)
+            _logger.debug("Transient Turso error on conn execute: %s", exc)
             self._reconnect(_backoff_for_attempt(0))
             raw_cursor = self._conn.cursor()
             await_only(asyncio.to_thread(raw_cursor.execute, sql, params or ()))
@@ -130,7 +130,7 @@ class _AsyncConn:
         except Exception as exc:
             if not _is_transient(exc):
                 raise
-            _logger.warning("Transient Turso error on conn executemany: %s", exc)
+            _logger.debug("Transient Turso error on conn executemany: %s", exc)
             self._reconnect(_backoff_for_attempt(0))
             raw_cursor = self._conn.cursor()
             await_only(asyncio.to_thread(raw_cursor.executemany, sql, params_seq))
@@ -165,7 +165,7 @@ class _AsyncCursor:
             except Exception as exc:
                 if not _is_transient(exc) or attempt >= 2:
                     raise
-                _logger.warning("Transient Turso error on cursor %s, attempt %d/3: %s", op, attempt + 1, exc)
+                _logger.debug("Transient Turso error on cursor %s, attempt %d/3: %s", op, attempt + 1, exc)
                 try:
                     self._conn._reconnect(_backoff_for_attempt(attempt))
                     self._cursor = self._conn._conn.cursor()
