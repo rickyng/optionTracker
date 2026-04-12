@@ -38,8 +38,8 @@ def _is_transient(exc: Exception) -> bool:
 
 
 def _backoff_for_attempt(attempt: int) -> float:
-    """Exponential backoff in seconds: 0.5, 1.0, 2.0 for attempts 0, 1, 2."""
-    return 0.5 * (2 ** attempt)
+    """Exponential backoff in seconds: 0.5, 1.0, 2.0 for attempts 0, 1, 2. Capped at 2s."""
+    return min(0.5 * (2 ** attempt), 2.0)
 
 
 def connect(database, **kwargs):
