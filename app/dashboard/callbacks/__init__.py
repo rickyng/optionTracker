@@ -188,6 +188,10 @@ def register_all_callbacks(dash_app):
     def update_overview(account_val, cap_pct, market_val):
         cap_pct = cap_pct or 30
         try:
+            # Trigger yfinance refresh if data is stale (instant no-op if fresh today)
+            with contextlib.suppress(Exception):
+                requests.post(f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=15)
+
             params = _filter_params(account_val, market_val)
             params["risk_margin_pct"] = cap_pct
 
@@ -424,7 +428,7 @@ def register_all_callbacks(dash_app):
         except Exception as e:
             return html.Div(f"Error loading overview: {e}"), html.Div("")
 
-    # ---- Refresh Prices callback ----
+    # ---- Refresh Market Data callback ----
     @dash_app.callback(
         Output("refresh-prices-status", "children"),
         Input("refresh-prices-btn", "n_clicks"),
@@ -437,10 +441,9 @@ def register_all_callbacks(dash_app):
             resp = requests.post(f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=180)
             data = resp.json()
             refreshed = data.get("refreshed", 0)
-            failed = data.get("failed", 0)
-            if failed > 0:
-                return f"Updated {refreshed}, failed {failed}"
-            return f"Updated {refreshed} prices"
+            if refreshed == 0:
+                return "All data fresh"
+            return f"Updated {refreshed} symbols"
         except Exception as e:
             return f"Error: {e}"
 

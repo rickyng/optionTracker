@@ -180,13 +180,16 @@ async def scan_watchlist(
 
 
 async def _scan_ticker_with_retry(
-    symbol: str, filters: ScanFilters, max_retries: int = 3
+    symbol: str,
+    filters: ScanFilters,
+    cached_info: dict | None = None,
+    max_retries: int = 3,
 ) -> tuple[str, list[ScreenerResultOut], str | None]:
     """Fetch and screen puts for a single ticker, with retry on rate-limit."""
     for attempt in range(max_retries + 1):
         try:
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, _fetch_and_screen, symbol, filters)
+            result = await loop.run_in_executor(None, _fetch_and_screen, symbol, filters, cached_info)
             return symbol, result, None
         except Exception as e:
             err_msg = str(e).lower()
@@ -199,39 +202,66 @@ async def _scan_ticker_with_retry(
             return symbol, [], str(e)
 
 
-def _fetch_and_screen(symbol: str, filters: ScanFilters) -> list[ScreenerResultOut]:
-    """Synchronous: fetch yfinance data and screen puts for one ticker."""
-    try:
+def _fetch_and_screen(
+    symbol: str,
+    filters: ScanFilters,
+    cached_info: dict | None = None,
+) -> list[ScreenerResultOut]:
+    """Synchronous: fetch yfinance data and screen puts for one ticker.
+
+    If cached_info is provided (from YahooDataService), skip the ticker.info
+    call and only fetch options chains.
+    """
+    if cached_info:
+        price = cached_info.get("price")
+        if not price:
+            raise ValueError(f"No cached price for {symbol}")
+        pe_ratio = cached_info.get("pe_ratio")
+        beta = cached_info.get("beta")
+        profit_margin = cached_info.get("profit_margin")
+        if profit_margin is not None:
+            profit_margin = profit_margin * 100
+        revenue_growth = cached_info.get("revenue_growth")
+        if revenue_growth is not None:
+            revenue_growth = revenue_growth * 100
+        strong = is_strong_fundamentals(pe_ratio, profit_margin, beta)
+        if beta is not None and beta > filters.max_beta:
+            return []
+
+        # Still need ticker object for options chains
         ticker = yf.Ticker(symbol)
-        info = ticker.info or {}
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "401" in err_msg or "crumb" in err_msg:
-            raise ValueError("Yahoo Finance auth error — try again later") from e
-        if "429" in err_msg or "rate" in err_msg or "too many" in err_msg:
-            raise ValueError("Rate limited by Yahoo Finance — try again later") from e
-        raise
+    else:
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.info or {}
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "401" in err_msg or "crumb" in err_msg:
+                raise ValueError("Yahoo Finance auth error — try again later") from e
+            if "429" in err_msg or "rate" in err_msg or "too many" in err_msg:
+                raise ValueError("Rate limited by Yahoo Finance — try again later") from e
+            raise
 
-    if not info:
-        raise ValueError(f"No data returned for {symbol}")
+        if not info:
+            raise ValueError(f"No data returned for {symbol}")
 
-    price = info.get("currentPrice") or info.get("regularMarketPrice")
-    if not price:
-        raise ValueError(f"No price for {symbol}")
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if not price:
+            raise ValueError(f"No price for {symbol}")
 
-    pe_ratio = info.get("trailingPE")
-    beta = info.get("beta")
-    profit_margin = info.get("profitMargins")
-    if profit_margin is not None:
-        profit_margin = profit_margin * 100
-    revenue_growth = info.get("revenueGrowth")
-    if revenue_growth is not None:
-        revenue_growth = revenue_growth * 100
+        pe_ratio = info.get("trailingPE")
+        beta = info.get("beta")
+        profit_margin = info.get("profitMargins")
+        if profit_margin is not None:
+            profit_margin = profit_margin * 100
+        revenue_growth = info.get("revenueGrowth")
+        if revenue_growth is not None:
+            revenue_growth = revenue_growth * 100
 
-    strong = is_strong_fundamentals(pe_ratio, profit_margin, beta)
+        strong = is_strong_fundamentals(pe_ratio, profit_margin, beta)
 
-    if beta is not None and beta > filters.max_beta:
-        return []
+        if beta is not None and beta > filters.max_beta:
+            return []
 
     expirations = ticker.options
     if not expirations:
@@ -388,6 +418,21 @@ async def _run_scan_background(
     try:
         _update_scan_job(job_id, status="running")
 
+        # Load cached fundamentals from YahooDataService (avoids redundant yfinance calls)
+        cached_fundamentals: dict[str, dict] = {}
+        async with async_session() as db:
+            from app.services.yahoo_data_service import refresh_if_stale
+
+            await refresh_if_stale(db, symbols)
+            # Read cached data for screener use
+            from sqlalchemy import select
+
+            from app.models.market_price import MarketPrice
+
+            result = await db.execute(select(MarketPrice).where(MarketPrice.symbol.in_(symbols)))
+            for row in result.scalars().all():
+                cached_fundamentals[row.symbol] = {"price": row.price}
+
         all_results: list[ScreenerResultOut] = []
         failed_tickers: list[str] = []
 
@@ -402,7 +447,8 @@ async def _run_scan_background(
             if i > 0:
                 await asyncio.sleep(3)
 
-            _, ticker_results, error = await _scan_ticker_with_retry(symbol, filters)
+            cached_info = cached_fundamentals.get(symbol)
+            _, ticker_results, error = await _scan_ticker_with_retry(symbol, filters, cached_info=cached_info)
             if error:
                 failed_tickers.append(symbol)
                 _logger.warning("Scan failed for %s: %s", symbol, error)

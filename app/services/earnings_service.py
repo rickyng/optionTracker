@@ -19,7 +19,8 @@ from app.utils.cache import dashboard_summary_cache
 logger = logging.getLogger(__name__)
 
 _STALE_DAYS = 7
-_SEMAPHORE = asyncio.Semaphore(3)
+_SEMAPHORE = asyncio.Semaphore(1)
+_DELAY_BETWEEN_FETCHES = 2.0  # seconds between yfinance calls to avoid rate limiting
 
 
 async def get_earnings_dates(db: AsyncSession, symbols: list[str]) -> dict[str, str | None]:
@@ -46,18 +47,41 @@ async def get_earnings_dates(db: AsyncSession, symbols: list[str]) -> dict[str, 
 async def refresh_earnings_dates(
     db: AsyncSession, symbols: list[str]
 ) -> dict[str, str | None]:
-    """Fetch earnings dates via yfinance, upsert into DB, return results."""
+    """Fetch earnings dates via yfinance, upsert into DB, return results.
+
+    Skips symbols with fresh cache (< 7 days old).
+    """
     if not symbols:
         return {}
 
-    logger.info("Refreshing earnings dates for %d symbols", len(symbols))
-    fetched = await fetch_earnings_batch(symbols)
-
-    now = datetime.now(UTC).isoformat()
-
-    # Bulk-fetch existing rows in one query (avoids N+1)
+    # Check which symbols already have fresh cache
     result = await db.execute(select(EarningsDate).where(EarningsDate.symbol.in_(symbols)))
     existing_map = {row.symbol: row for row in result.scalars().all()}
+
+    cutoff = datetime.now(UTC) - timedelta(days=_STALE_DAYS)
+
+    stale_symbols: list[str] = []
+    dates: dict[str, str | None] = {}
+
+    for sym in symbols:
+        row = existing_map.get(sym)
+        if row and row.updated_at:
+            try:
+                if datetime.fromisoformat(row.updated_at) >= cutoff:
+                    dates[sym] = row.earnings_date
+                    continue
+            except (ValueError, TypeError):
+                pass
+        stale_symbols.append(sym)
+
+    if not stale_symbols:
+        logger.info("All %d earnings dates fresh, skipping fetch", len(symbols))
+        return dates
+
+    logger.info("Refreshing earnings dates for %d/%d symbols (rest cached)", len(stale_symbols), len(symbols))
+    fetched = await fetch_earnings_batch(stale_symbols)
+
+    now = datetime.now(UTC).isoformat()
 
     for symbol, earnings_date in fetched.items():
         row = existing_map.get(symbol)
@@ -70,10 +94,11 @@ async def refresh_earnings_dates(
     await db.commit()
     dashboard_summary_cache.invalidate()
 
+    dates.update(fetched)
     found = sum(1 for v in fetched.values() if v is not None)
-    logger.info("Earnings refresh complete: %d found, %d missing", found, len(symbols) - found)
+    logger.info("Earnings refresh complete: %d found, %d missing", found, len(stale_symbols) - found)
 
-    return fetched
+    return dates
 
 
 async def refresh_all_earnings_dates(
@@ -96,22 +121,23 @@ async def refresh_all_earnings_dates(
 async def fetch_earnings_batch(symbols: list[str]) -> dict[str, str | None]:
     """Fetch upcoming earnings dates for multiple symbols via yfinance.
 
-    Uses a semaphore to limit concurrency (same pattern as screener_service).
+    Runs sequentially with delays to avoid rate limiting.
     """
     if not symbols:
         return {}
 
     loop = asyncio.get_running_loop()
-    tasks = [_fetch_with_semaphore(loop, sym) for sym in symbols]
-    results_list = await asyncio.gather(*tasks, return_exceptions=True)
-
     results: dict[str, str | None] = {}
-    for sym, result in zip(symbols, results_list, strict=True):
-        if isinstance(result, Exception):
-            logger.warning("Earnings fetch failed for %s: %s", sym, result)
-            results[sym] = None
-        else:
+
+    for i, sym in enumerate(symbols):
+        if i > 0:
+            await asyncio.sleep(_DELAY_BETWEEN_FETCHES)
+        try:
+            result = await _fetch_with_semaphore(loop, sym)
             results[sym] = result
+        except Exception as e:
+            logger.warning("Earnings fetch failed for %s: %s", sym, e)
+            results[sym] = None
 
     return results
 

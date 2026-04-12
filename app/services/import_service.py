@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,34 +115,8 @@ async def import_csv(
     # Invalidate caches so dashboard reflects new data
     invalidate_all_caches()
 
-    # Trigger background price refresh for new underlyings
-    asyncio.create_task(_refresh_prices_background(user_account_ids))
+    # Note: yfinance data (prices, earnings) is now fetched separately via
+    # YahooDataService when dashboard tabs load with stale data. Flex sync
+    # only handles IBKR data (positions, trades).
 
     return {"positions_imported": pos_count, "trades_imported": trade_count}
-
-
-async def _refresh_prices_background(user_account_ids: list[int] | None) -> None:
-    """Background task to refresh prices and earnings dates after import."""
-    try:
-        await asyncio.gather(
-            _refresh_prices(user_account_ids),
-            _refresh_earnings(user_account_ids),
-        )
-    except Exception:
-        logger.exception("Background price/earnings refresh failed")
-
-
-async def _refresh_prices(user_account_ids: list[int] | None) -> None:
-    from app.database import async_session
-    from app.services.market_price_service import refresh_all_prices
-
-    async with async_session() as db:
-        await refresh_all_prices(db, user_account_ids)
-
-
-async def _refresh_earnings(user_account_ids: list[int] | None) -> None:
-    from app.database import async_session
-    from app.services.earnings_service import refresh_all_earnings_dates
-
-    async with async_session() as db:
-        await refresh_all_earnings_dates(db, user_account_ids)
