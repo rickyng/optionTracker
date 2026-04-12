@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import os
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
@@ -95,14 +96,81 @@ def _get_user_headers():
     return headers
 
 
-def _api_get(path, params=None, timeout=5):
-    """GET from internal API. Returns parsed JSON or None on error."""
-    try:
-        resp = requests.get(f"{API_BASE}{path}", params=params, headers=_get_user_headers(), timeout=timeout)
-        return resp.json()
-    except Exception as e:
-        _logger.warning("API GET %s failed: %s", path, e)
-        return None
+def _api_get(path, params=None, timeout=5, max_retries=2):
+    """GET from internal API with retry on transient errors. Returns parsed JSON or None."""
+    headers = _get_user_headers()
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(f"{API_BASE}{path}", params=params, headers=headers, timeout=timeout)
+            return resp.json()
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+        except Exception as e:
+            _logger.warning("API GET %s failed: %s", path, e)
+            return None
+    _logger.warning("API GET %s failed after %d retries: %s", path, max_retries, last_exc)
+    return None
+
+
+def _api_post(path, json=None, timeout=15, max_retries=2):
+    """POST to internal API with retry on transient errors. Returns Response or None."""
+    headers = _get_user_headers()
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return requests.post(f"{API_BASE}{path}", json=json, headers=headers, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+        except Exception as e:
+            _logger.warning("API POST %s failed: %s", path, e)
+            return None
+    _logger.warning("API POST %s failed after %d retries: %s", path, max_retries, last_exc)
+    return None
+
+
+def _api_delete(path, timeout=5, max_retries=2):
+    """DELETE from internal API with retry on transient errors. Returns Response or None."""
+    headers = _get_user_headers()
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return requests.delete(f"{API_BASE}{path}", headers=headers, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+        except Exception as e:
+            _logger.warning("API DELETE %s failed: %s", path, e)
+            return None
+    _logger.warning("API DELETE %s failed after %d retries: %s", path, max_retries, last_exc)
+    return None
+
+
+def _api_put(path, params=None, timeout=5, max_retries=2):
+    """PUT to internal API with retry on transient errors. Returns Response or None."""
+    headers = _get_user_headers()
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return requests.put(f"{API_BASE}{path}", params=params, headers=headers, timeout=timeout)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+        except Exception as e:
+            _logger.warning("API PUT %s failed: %s", path, e)
+            return None
+    _logger.warning("API PUT %s failed after %d retries: %s", path, max_retries, last_exc)
+    return None
 
 
 def _filter_params(account_val, market_val):
@@ -190,15 +258,12 @@ def register_all_callbacks(dash_app):
         try:
             # Trigger yfinance refresh if data is stale (instant no-op if fresh today)
             with contextlib.suppress(Exception):
-                requests.post(f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=15)
+                _api_post("/api/prices/refresh", timeout=15)
 
             params = _filter_params(account_val, market_val)
             params["risk_margin_pct"] = cap_pct
 
-            resp = requests.get(
-                f"{API_BASE}/api/dashboard/summary", params=params, headers=_get_user_headers(), timeout=15
-            )
-            data = resp.json()
+            data = _api_get("/api/dashboard/summary", params=params, timeout=15)
             cards = make_summary_cards(data)
 
             exposure = data.get("underlying_exposure", {})
@@ -438,7 +503,9 @@ def register_all_callbacks(dash_app):
         if not n_clicks:
             return ""
         try:
-            resp = requests.post(f"{API_BASE}/api/prices/refresh", headers=_get_user_headers(), timeout=180)
+            resp = _api_post("/api/prices/refresh", timeout=180)
+            if resp is None:
+                return "Error: refresh failed"
             data = resp.json()
             refreshed = data.get("refreshed", 0)
             if refreshed == 0:
@@ -509,10 +576,9 @@ def register_all_callbacks(dash_app):
             # Single API call fetches all margin percentages at once
             pcts_to_fetch = sorted(set([0, 5, 10, 20, cap_pct]))
             params["pcts"] = ",".join(str(p) for p in pcts_to_fetch)
-            resp = requests.get(
-                f"{API_BASE}/api/dashboard/summary-multi", params=params, headers=_get_user_headers(), timeout=15
-            )
-            pct_data = resp.json()
+            pct_data = _api_get("/api/dashboard/summary-multi", params=params, timeout=15)
+            if pct_data is None:
+                return html.Div("Failed to load risk data"), dash.no_update
 
             comparison_colors = {"0": "#b388ff", "5": "#64ffda", "10": "#448aff", "20": "#ff5252"}
 
@@ -761,7 +827,7 @@ def register_all_callbacks(dash_app):
         if isinstance(triggered, dict) and triggered.get("type") == "remove-account-btn":
             account_id = triggered["index"]
             with contextlib.suppress(Exception):
-                requests.delete(f"{API_BASE}/api/accounts/{account_id}", headers=_get_user_headers(), timeout=5)
+                _api_delete(f"/api/accounts/{account_id}")
             return account_id
         return dash.no_update
 
@@ -860,8 +926,9 @@ def register_all_callbacks(dash_app):
         if isinstance(triggered, dict) and triggered.get("type") == "edit-account-btn":
             account_id = triggered["index"]
             try:
-                resp = requests.get(f"{API_BASE}/api/accounts/{account_id}", headers=_get_user_headers(), timeout=5)
-                a = resp.json()
+                a = _api_get(f"/api/accounts/{account_id}")
+                if a is None:
+                    return {"display": "none"}, "d-none", dash.no_update, "", "", "", "true"
                 return (
                     {"display": "block"},
                     "",
@@ -898,12 +965,7 @@ def register_all_callbacks(dash_app):
                 params["query_id"] = query_id
             if enabled:
                 params["enabled"] = enabled == "true"
-            resp = requests.put(
-                f"{API_BASE}/api/accounts/{account_id}",
-                params=params,
-                headers=_get_user_headers(),
-                timeout=5,
-            )
+            resp = _api_put(f"/api/accounts/{account_id}", params=params)
             result, err = _safe_json_resp(resp)
             if err:
                 return html.Small(f"Error: {err}", style={"color": ACCENT_LOSS})
@@ -926,10 +988,9 @@ def register_all_callbacks(dash_app):
         if not n_clicks or not name or not token or not query_id:
             return ""
         try:
-            resp = requests.post(
-                f"{API_BASE}/api/accounts",
+            resp = _api_post(
+                "/api/accounts",
                 json={"name": name, "token": token, "query_id": query_id},
-                headers=_get_user_headers(),
                 timeout=10,
             )
             result, err = _safe_json_resp(resp)
@@ -962,9 +1023,15 @@ def register_all_callbacks(dash_app):
         # Case 1: Button click — trigger downloads (guard against DOM-mount trigger)
         if triggered == "sync-all-btn.n_clicks" and n_clicks:
             try:
-                url = f"{API_BASE}/api/flex/download"
-                _logger.info("POST %s", url)
-                resp = requests.post(url, headers=_get_user_headers(), timeout=15)
+                _logger.info("POST /api/flex/download")
+                resp = _api_post("/api/flex/download", timeout=15)
+                if resp is None:
+                    return (
+                        {},
+                        [html.Small("Failed to trigger download (network error)", style={"color": ACCENT_LOSS})],
+                        [],
+                        True,
+                    )
                 _logger.info("POST response: status=%s body=%s", resp.status_code, resp.text[:500])
                 if not resp.ok:
                     return (
@@ -1028,6 +1095,9 @@ def register_all_callbacks(dash_app):
                 resp = requests.get(f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=45)
                 _logger.info("Poll %s: status=%s body=%s", job_id, resp.status_code, resp.text[:200])
                 return job_id, resp.json()
+            except (requests.Timeout, requests.ConnectionError) as e:
+                _logger.warning("Poll %s network error (will retry): %s", job_id, e)
+                return job_id, None
             except Exception as e:
                 _logger.warning("Poll %s failed: %s", job_id, e)
                 return job_id, None
@@ -1245,7 +1315,6 @@ def register_all_callbacks(dash_app):
         ctx = dash.callback_context
         triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
 
-        headers = _get_user_headers()
         status_msg = ""
 
         # Remove symbol
@@ -1254,11 +1323,7 @@ def register_all_callbacks(dash_app):
             if isinstance(triggered_id, dict) and triggered_id.get("type") == "remove-symbol-btn":
                 sym = triggered_id["index"]
                 try:
-                    requests.delete(
-                        f"{API_BASE}/api/screener/watchlist/{sym}",
-                        headers=headers,
-                        timeout=5,
-                    )
+                    _api_delete(f"/api/screener/watchlist/{sym}")
                     status_msg = f"Removed {sym}"
                 except Exception as e:
                     status_msg = f"Failed: {e}"
@@ -1270,27 +1335,20 @@ def register_all_callbacks(dash_app):
                 status_msg = "Enter a symbol"
             else:
                 try:
-                    resp = requests.post(
-                        f"{API_BASE}/api/screener/watchlist",
-                        json={"symbol": symbol_upper},
-                        headers=headers,
-                        timeout=5,
-                    )
-                    if resp.ok:
+                    resp = _api_post("/api/screener/watchlist", json={"symbol": symbol_upper})
+                    if resp and resp.ok:
                         status_msg = f"Added {symbol_upper}"
-                    else:
+                    elif resp:
                         detail = resp.json().get("detail", resp.text[:50])
                         status_msg = detail
+                    else:
+                        status_msg = "Network error"
                 except Exception as e:
                     status_msg = f"Failed: {e}"
 
         # Fetch current watchlist
-        try:
-            resp = requests.get(f"{API_BASE}/api/screener/watchlist", headers=headers, timeout=5)
-            data = resp.json()
-            symbols = data.get("symbols", [])
-        except Exception:
-            symbols = []
+        data = _api_get("/api/screener/watchlist")
+        symbols = data.get("symbols", []) if data else []
 
         return symbols, status_msg
 
@@ -1347,7 +1405,16 @@ def register_all_callbacks(dash_app):
     )
     def restore_filters(active_tab, saved):
         if active_tab != "suggestions" or not saved:
-            return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+            return (
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+                dash.no_update,
+            )
         return (
             saved.get("min_iv", 30),
             saved.get("min_delta", 0.15),
@@ -1429,12 +1496,9 @@ def register_all_callbacks(dash_app):
                 payload["max_capital"] = max_capital
 
             try:
-                resp = requests.post(
-                    f"{API_BASE}/api/screener/scan",
-                    json=payload,
-                    headers=_get_user_headers(),
-                    timeout=15,
-                )
+                resp = _api_post("/api/screener/scan", json=payload, timeout=15)
+                if resp is None:
+                    return {}, "Error: network error", True, saved_filters, dash.no_update
                 data = resp.json()
                 job_id = data.get("job_id")
                 if not job_id:
@@ -1459,12 +1523,9 @@ def register_all_callbacks(dash_app):
         timed_out = attempts >= _max_scan_poll_attempts
 
         try:
-            resp = requests.get(
-                f"{API_BASE}/api/screener/scan/{job_id}",
-                headers=_get_user_headers(),
-                timeout=45,
-            )
-            data = resp.json()
+            data = _api_get(f"/api/screener/scan/{job_id}", timeout=45)
+            if data is None:
+                raise RuntimeError("Network error polling scan job")
         except Exception as e:
             if timed_out:
                 return store, f"Timed out: {e}", True, saved_filters, dash.no_update
@@ -1566,8 +1627,18 @@ def register_all_callbacks(dash_app):
         Input("filter-max-capital", "value"),
     )
     def update_screener_table(
-        scan_data, active_tab, ticker, min_rating,
-        min_iv, min_delta, max_delta, min_dte, max_dte, min_otm, min_roc, max_capital,
+        scan_data,
+        active_tab,
+        ticker,
+        min_rating,
+        min_iv,
+        min_delta,
+        max_delta,
+        min_dte,
+        max_dte,
+        min_otm,
+        min_roc,
+        max_capital,
     ):
         results = scan_data.get("results", [])
         if not results or active_tab != "suggestions":

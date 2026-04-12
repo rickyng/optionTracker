@@ -19,15 +19,13 @@ import yfinance as yf
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_fx_rate
+from app.config import get_fx_rate, settings
 from app.models.earnings_date import EarningsDate
 from app.models.market_price import MarketPrice
 from app.services.price_service import _yahoo_lookup_symbol
 from app.utils.cache import dashboard_summary_cache
 
 logger = logging.getLogger(__name__)
-
-_DELAY_BETWEEN_FETCHES = 2.0  # seconds between yfinance calls
 
 
 def _is_fresh_today(updated_at_str: str | None) -> bool:
@@ -63,14 +61,14 @@ async def refresh_if_stale(db: AsyncSession, symbols: list[str]) -> dict[str, di
 
     for i, symbol in enumerate(stale_symbols):
         if i > 0:
-            await asyncio.sleep(_DELAY_BETWEEN_FETCHES)
+            await asyncio.sleep(settings.yfinance_delay_between_symbols)
 
         try:
             data = await _fetch_ticker_info(symbol)
             if data:
                 results[symbol] = data
-                _upsert_price(db, symbol, data)
-                _upsert_earnings(db, symbol, data)
+                await _upsert_price(db, symbol, data)
+                await _upsert_earnings(db, symbol, data)
         except Exception as e:
             logger.warning("yfinance fetch failed for %s: %s", symbol, e)
 
@@ -142,7 +140,7 @@ def _get_ticker_info(lookup: str) -> dict | None:
         return None
 
 
-def _upsert_price(db: AsyncSession, symbol: str, data: dict) -> None:
+async def _upsert_price(db: AsyncSession, symbol: str, data: dict) -> None:
     """Upsert market price (converted to USD)."""
     price = data.get("price")
     if price is None:
@@ -152,7 +150,7 @@ def _upsert_price(db: AsyncSession, symbol: str, data: dict) -> None:
     usd_price = price * rate
     now = datetime.now(UTC).isoformat()
 
-    row_result = db.execute(select(MarketPrice).where(MarketPrice.symbol == symbol))
+    row_result = await db.execute(select(MarketPrice).where(MarketPrice.symbol == symbol))
     row = row_result.scalar_one_or_none()
 
     if row:
@@ -162,7 +160,7 @@ def _upsert_price(db: AsyncSession, symbol: str, data: dict) -> None:
         db.add(MarketPrice(symbol=symbol, price=usd_price, updated_at=now))
 
 
-def _upsert_earnings(db: AsyncSession, symbol: str, data: dict) -> None:
+async def _upsert_earnings(db: AsyncSession, symbol: str, data: dict) -> None:
     """Upsert earnings date."""
     earnings_date = data.get("earnings_date")
     if earnings_date is None:
@@ -170,7 +168,7 @@ def _upsert_earnings(db: AsyncSession, symbol: str, data: dict) -> None:
 
     now = datetime.now(UTC).isoformat()
 
-    row_result = db.execute(select(EarningsDate).where(EarningsDate.symbol == symbol))
+    row_result = await db.execute(select(EarningsDate).where(EarningsDate.symbol == symbol))
     row = row_result.scalar_one_or_none()
 
     if row:

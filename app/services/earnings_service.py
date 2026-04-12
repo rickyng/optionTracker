@@ -13,6 +13,7 @@ import yfinance as yf
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.earnings_date import EarningsDate
 from app.utils.cache import dashboard_summary_cache
 
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 _STALE_DAYS = 7
 _SEMAPHORE = asyncio.Semaphore(1)
-_DELAY_BETWEEN_FETCHES = 2.0  # seconds between yfinance calls to avoid rate limiting
 
 
 async def get_earnings_dates(db: AsyncSession, symbols: list[str]) -> dict[str, str | None]:
@@ -44,9 +44,7 @@ async def get_earnings_dates(db: AsyncSession, symbols: list[str]) -> dict[str, 
     return dates
 
 
-async def refresh_earnings_dates(
-    db: AsyncSession, symbols: list[str]
-) -> dict[str, str | None]:
+async def refresh_earnings_dates(db: AsyncSession, symbols: list[str]) -> dict[str, str | None]:
     """Fetch earnings dates via yfinance, upsert into DB, return results.
 
     Skips symbols with fresh cache (< 7 days old).
@@ -131,7 +129,7 @@ async def fetch_earnings_batch(symbols: list[str]) -> dict[str, str | None]:
 
     for i, sym in enumerate(symbols):
         if i > 0:
-            await asyncio.sleep(_DELAY_BETWEEN_FETCHES)
+            await asyncio.sleep(settings.yfinance_delay_between_symbols)
         try:
             result = await _fetch_with_semaphore(loop, sym)
             results[sym] = result

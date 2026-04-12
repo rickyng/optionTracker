@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     # Price Fetching
     alphavantage_api_key: str = ""
 
+    # yfinance Rate Limiting
+    yfinance_delay_between_symbols: float = 2.0  # seconds between ticker.info calls
+    yfinance_delay_between_chains: float = 1.5  # seconds between option_chain calls
+    yfinance_ticker_delay: float = 5.0  # seconds between ticker scans
+    yfinance_rate_limit_cooldown: float = 30.0  # seconds to pause after any 429
+
+    # Dashboard Callbacks
+    dashboard_api_timeout_short: int = 5  # CRUD operations
+    dashboard_api_timeout_medium: int = 15  # Data fetches
+    dashboard_api_timeout_long: int = 45  # Job polling
+    dashboard_api_timeout_extended: int = 180  # Manual refresh
+
     model_config = {"env_prefix": "IBKR_", "env_file": ".env", "extra": "ignore"}
 
 

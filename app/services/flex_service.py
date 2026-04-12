@@ -33,10 +33,7 @@ async def trigger_flex_download(
     """Start a Flex download job. Returns job_id."""
     # Dedup: return existing job if account already has an active one
     for jid, job in _jobs.items():
-        if (
-            job["account_id"] == account_id
-            and job["status"] in ("pending", "requesting", "polling")
-        ):
+        if job["account_id"] == account_id and job["status"] in ("pending", "requesting", "polling"):
             logger.info("Reusing active job %s for account %d", jid, account_id)
             return jid
 
@@ -50,9 +47,7 @@ async def trigger_flex_download(
         "user_account_ids": user_account_ids,
     }
 
-    task = asyncio.create_task(
-        _run_download(job_id, account_id, token, query_id, user_account_ids)
-    )
+    task = asyncio.create_task(_run_download(job_id, account_id, token, query_id, user_account_ids))
     _running_tasks.add(task)
     task.add_done_callback(_running_tasks.discard)
     return job_id
@@ -125,7 +120,7 @@ async def _run_download_inner(
         # Step 1: SendRequest
         send_url = f"{FLEX_BASE}/SendRequest"
         logger.info("SendRequest: token=%s... query_id=%s", token[:8] if token else "None", query_id)
-        resp_text = await http_client.get_raw(send_url, params={"t": token, "q": query_id, "v": 3})
+        resp_text = await http_client.get_raw(send_url, params={"t": token, "q": query_id, "v": 3}, max_retries=3)
         parsed = parse_flex_send_response(resp_text)
 
         if parsed["status"] != "Success":
@@ -142,7 +137,7 @@ async def _run_download_inner(
         max_attempts = settings.flex_max_poll_duration // settings.flex_poll_interval
 
         for _ in range(max_attempts):
-            content = await http_client.get_raw(get_url, params={"t": token, "q": ref_code, "v": 3})
+            content = await http_client.get_raw(get_url, params={"t": token, "q": ref_code, "v": 3}, max_retries=3)
             result = parse_flex_statement_response(content)
 
             if result["status"] == "Success":

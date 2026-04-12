@@ -19,6 +19,7 @@ from app.analysis.option_greeks import (
     calc_rating,
     is_strong_fundamentals,
 )
+from app.config import settings
 from app.models.market_price import MarketPrice
 from app.models.screener import ScreenerResult, ScreenerWatchlist
 from app.schemas.screener import ScanFilters, ScreenerResultOut
@@ -34,7 +35,12 @@ _scan_jobs: dict[str, dict] = {}
 # Global rate limit backoff state
 _last_rate_limit_time: float = 0.0
 _cooldown_applied_time: float = 0.0  # when we last waited for cooldown
-_RATE_LIMIT_COOLDOWN = 30.0  # seconds to pause after any 429
+
+
+def _rate_limit_cooldown() -> float:
+    """Get cooldown duration from settings."""
+    return settings.yfinance_rate_limit_cooldown
+
 
 DEFAULT_WATCHLIST = [
     "ADBE",
@@ -205,7 +211,7 @@ async def _scan_ticker_with_retry(
             if is_rate_limit:
                 _last_rate_limit_time = time.time()
                 if attempt < max_retries:
-                    backoff = 5 * (2**attempt)  # 5s, 10s, 20s
+                    backoff = settings.yfinance_delay_between_symbols * (2**attempt)  # exponential
                     _logger.warning("Rate limited on %s, retry %d/%d in %ds", symbol, attempt + 1, max_retries, backoff)
                     await asyncio.sleep(backoff)
                     continue
@@ -297,7 +303,7 @@ def _fetch_and_screen(
     for i, (exp_str, dte) in enumerate(valid_expirations):
         # Space out yfinance calls to avoid rate limiting
         if i > 0:
-            time.sleep(1.5)
+            time.sleep(settings.yfinance_delay_between_chains)
 
         try:
             chain = ticker.option_chain(exp_str)
@@ -464,12 +470,13 @@ async def _run_scan_background(
 
             # Check for global rate limit backoff (only wait once per cooldown window)
             time_since_rate_limit = time.time() - _last_rate_limit_time
+            cooldown = _rate_limit_cooldown()
             if (
                 _last_rate_limit_time > 0
-                and time_since_rate_limit < _RATE_LIMIT_COOLDOWN
+                and time_since_rate_limit < cooldown
                 and _cooldown_applied_time < _last_rate_limit_time
             ):
-                wait_time = _RATE_LIMIT_COOLDOWN - time_since_rate_limit
+                wait_time = cooldown - time_since_rate_limit
                 _logger.info("Global rate limit backoff: waiting %.1fs before %s", wait_time, symbol)
                 _update_scan_job(job_id, status="rate_limited")
                 await asyncio.sleep(wait_time)
@@ -478,12 +485,10 @@ async def _run_scan_background(
 
             # Space out requests to avoid yfinance rate limiting
             if i > 0:
-                await asyncio.sleep(5)
+                await asyncio.sleep(settings.yfinance_ticker_delay)
 
             cached_info = cached_fundamentals.get(symbol)
-            _, ticker_results, error = await _scan_ticker_with_retry(
-                symbol, filters, cached_info=cached_info
-            )
+            _, ticker_results, error = await _scan_ticker_with_retry(symbol, filters, cached_info=cached_info)
             if error:
                 failed_tickers.append(symbol)
                 _logger.warning("Scan failed for %s: %s", symbol, error)

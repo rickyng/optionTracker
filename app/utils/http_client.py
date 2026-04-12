@@ -38,11 +38,31 @@ class HttpClient:
             await asyncio.sleep(delay)
         raise last_exc or httpx.RequestError("Max retries exceeded")
 
-    async def get_raw(self, url: str, params: dict | None = None) -> str:
-        """GET returning raw text content (for CSV/XML responses)."""
+    async def get_raw(
+        self, url: str, params: dict | None = None, timeout: int | None = None, max_retries: int = 0
+    ) -> str:
+        """GET returning raw text content (for CSV/XML responses).
+
+        Args:
+            max_retries: Number of retries on transient errors (default 0 — no retry).
+        """
         client = await self._get_client()
-        resp = await client.get(url, params=params)
-        return resp.text
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                resp = await client.get(url, params=params, timeout=timeout or settings.http_timeout)
+                return resp.text
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (401, 403, 404):
+                    raise
+                last_exc = e
+            except httpx.RequestError as e:
+                last_exc = e
+            if attempt < max_retries:
+                delay = settings.http_retry_delay_ms / 1000 * (2**attempt)
+                await asyncio.sleep(delay)
+        if last_exc:
+            raise last_exc
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
