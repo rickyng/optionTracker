@@ -132,7 +132,7 @@ async def scan_watchlist(
         return [], []
 
 
-    tasks = [_scan_ticker(sym, filters, delay=i * 0.5) for i, sym in enumerate(symbols)]
+    tasks = [_scan_ticker_with_retry(sym, filters) for i, sym in enumerate(symbols)]
     tick_results = await asyncio.gather(*tasks)
 
     all_results: list[ScreenerResultOut] = []
@@ -179,16 +179,23 @@ async def scan_watchlist(
     return all_results, failed_tickers
 
 
-async def _scan_ticker(
-    symbol: str, filters: ScanFilters, delay: float = 0.0
+async def _scan_ticker_with_retry(
+    symbol: str, filters: ScanFilters, max_retries: int = 3
 ) -> tuple[str, list[ScreenerResultOut], str | None]:
-    """Fetch and screen puts for a single ticker."""
-    async with _SEMAPHORE:
+    """Fetch and screen puts for a single ticker, with retry on rate-limit."""
+    for attempt in range(max_retries + 1):
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, _fetch_and_screen, symbol, filters)
             return symbol, result, None
         except Exception as e:
+            err_msg = str(e).lower()
+            is_rate_limit = "rate" in err_msg or "429" in err_msg or "too many" in err_msg
+            if is_rate_limit and attempt < max_retries:
+                backoff = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                _logger.warning("Rate limited on %s, retry %d/%d in %ds", symbol, attempt + 1, max_retries, backoff)
+                await asyncio.sleep(backoff)
+                continue
             return symbol, [], str(e)
 
 
@@ -393,9 +400,9 @@ async def _run_scan_background(
 
             # Space out requests to avoid yfinance rate limiting
             if i > 0:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(3)
 
-            _, ticker_results, error = await _scan_ticker(symbol, filters)
+            _, ticker_results, error = await _scan_ticker_with_retry(symbol, filters)
             if error:
                 failed_tickers.append(symbol)
                 _logger.warning("Scan failed for %s: %s", symbol, error)

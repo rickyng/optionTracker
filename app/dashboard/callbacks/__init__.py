@@ -1356,7 +1356,7 @@ def register_all_callbacks(dash_app):
             saved.get("max_capital", 50000),
         )
 
-    _max_scan_poll_attempts = 60
+    _max_scan_poll_attempts = 120
 
     @dash_app.callback(
         Output("scan-job-store", "data"),
