@@ -267,6 +267,18 @@ def settings_layout():
                     ),
                 ],
             ),
+            # ── Account Sync Status ────────────────────────────────────────
+            html.Div(style={"height": "1.5rem"}),
+            card(
+                "Account Sync Status",
+                [html.Div(id="account-sync-status")],
+            ),
+            # ── Stock Prices (yfinance) Status ──────────────────────────────
+            html.Div(style={"height": "1.5rem"}),
+            card(
+                "Stock Prices Status",
+                [html.Div(id="price-sync-status")],
+            ),
         ]
     )
 

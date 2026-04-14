@@ -29,6 +29,7 @@ from app.dashboard.tokens import (
     BG_ROW_ALT,
     BORDER,
     PLOT_LAYOUT,
+    TEXT_ACCENT,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
 )
@@ -746,22 +747,112 @@ def register_all_callbacks(dash_app):
         Output("expiry-14to21", "children"),
         Output("expiry-gt21", "children"),
         Input("positions-store", "data"),
+        Input("main-tabs", "active_tab"),
     )
-    def update_expiration(positions):
+    def update_expiration(positions, active_tab):
+        if active_tab != "expiration":
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
         if not positions:
             empty = [html.Small("No positions")]
             return empty, empty, empty, empty
 
+        # Fetch market prices for all underlyings
+        market_prices = {}
+        try:
+            price_data = _api_get("/api/sync/price-status", timeout=10)
+            if price_data and price_data.get("symbols"):
+                for sym in price_data["symbols"]:
+                    market_prices[sym["symbol"]] = sym.get("price")
+        except Exception:
+            pass
+
+        def calc_moneyness(p):
+            """Calculate moneyness category: ITM, ATM, 5% OTM, 10% OTM."""
+            underlying = p.get("underlying")
+            strike = p.get("strike")
+            right = p.get("right")  # "C" or "P"
+            price = market_prices.get(underlying)
+
+            if price is None or strike is None:
+                return "N/A", TEXT_SECONDARY
+
+            # For short puts: ITM when price < strike (obligated to buy at higher strike)
+            # For short calls: ITM when price > strike (obligated to sell at lower strike)
+            if right == "P":
+                # Short put
+                if price < strike:
+                    # ITM - stock below strike
+                    otm_pct = ((strike - price) / price) * 100
+                    if otm_pct <= 5:
+                        return "ITM", ACCENT_PROFIT
+                    elif otm_pct <= 10:
+                        return "5% ITM", ACCENT_WARN
+                    else:
+                        return "10% ITM", ACCENT_LOSS
+                else:
+                    # OTM - stock above strike
+                    otm_pct = ((price - strike) / price) * 100
+                    if otm_pct <= 5:
+                        return "ATM", TEXT_SECONDARY
+                    elif otm_pct <= 10:
+                        return "5% OTM", ACCENT_WARN
+                    else:
+                        return "10% OTM", ACCENT_LOSS
+            else:
+                # Short call (right == "C")
+                if price > strike:
+                    # ITM - stock above strike
+                    otm_pct = ((price - strike) / price) * 100
+                    if otm_pct <= 5:
+                        return "ITM", ACCENT_PROFIT
+                    elif otm_pct <= 10:
+                        return "5% ITM", ACCENT_WARN
+                    else:
+                        return "10% ITM", ACCENT_LOSS
+                else:
+                    # OTM - stock below strike
+                    otm_pct = ((strike - price) / price) * 100
+                    if otm_pct <= 5:
+                        return "ATM", TEXT_SECONDARY
+                    elif otm_pct <= 10:
+                        return "5% OTM", ACCENT_WARN
+                    else:
+                        return "10% OTM", ACCENT_LOSS
+
         lt7, w7to14, w14to21, gt21 = [], [], [], []
+        # Track counts for summary breakdown
+        lt7_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
+        w7to14_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
+        w14to21_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
+        gt21_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
+
         for p in positions:
             try:
                 dte = p.get("days_to_expiry", 999)
+                moneyness, moneyness_color = calc_moneyness(p)
+
+                # Create badge for moneyness
+                moneyness_badge = dbc.Badge(
+                    moneyness,
+                    color=None,
+                    pill=True,
+                    style={
+                        "backgroundColor": moneyness_color,
+                        "color": "#0f0f1a" if moneyness_color in (ACCENT_PROFIT, ACCENT_WARN) else "#fff",
+                        "fontSize": "0.65rem",
+                        "fontWeight": 600,
+                        "marginLeft": "0.5rem",
+                    },
+                )
+
                 item = dbc.Card(
                     [
                         dbc.CardBody(
                             [
                                 html.Strong(p["underlying"], style={"color": TEXT_PRIMARY}),
                                 html.Span(f" {p['right']} {p['strike']}", style={"color": TEXT_SECONDARY}),
+                                moneyness_badge,
                                 html.Br(),
                                 html.Small(f"{p['account_name']} | DTE: {dte}", style={"color": TEXT_SECONDARY}),
                             ]
@@ -774,18 +865,82 @@ def register_all_callbacks(dash_app):
                     },
                     className="mb-1",
                 )
+
+                # Update counts for summary
+                if moneyness in ("ITM", "5% ITM"):
+                    count_key = "ITM"
+                elif moneyness in ("5% OTM", "ATM"):
+                    count_key = "5% OTM"
+                else:
+                    count_key = "10% OTM"
+
                 if dte < 7:
                     lt7.append(item)
+                    lt7_counts[count_key] += 1
                 elif dte < 14:
                     w7to14.append(item)
+                    w7to14_counts[count_key] += 1
                 elif dte < 21:
                     w14to21.append(item)
+                    w14to21_counts[count_key] += 1
                 else:
                     gt21.append(item)
+                    gt21_counts[count_key] += 1
             except (ValueError, KeyError):
                 pass
 
-        return _with_count(lt7), _with_count(w7to14), _with_count(w14to21), _with_count(gt21)
+        # Build summary badges for each bucket
+        def make_summary_row(counts):
+            badges = []
+            itm_count = counts.get("ITM", 0)
+            otm5_count = counts.get("5% OTM", 0)
+            otm10_count = counts.get("10% OTM", 0)
+            if itm_count > 0:
+                badges.append(
+                    html.Span(
+                        f"ITM: {itm_count}",
+                        style={
+                            "color": ACCENT_PROFIT,
+                            "fontSize": "0.75rem",
+                            "marginRight": "0.5rem",
+                        },
+                    )
+                )
+            if otm5_count > 0:
+                badges.append(
+                    html.Span(
+                        f"5% OTM: {otm5_count}",
+                        style={
+                            "color": ACCENT_WARN,
+                            "fontSize": "0.75rem",
+                            "marginRight": "0.5rem",
+                        },
+                    )
+                )
+            if otm10_count > 0:
+                badges.append(
+                    html.Span(
+                        f"10% OTM: {otm10_count}",
+                        style={
+                            "color": ACCENT_LOSS,
+                            "fontSize": "0.75rem",
+                        },
+                    )
+                )
+            if not badges:
+                return html.Div()
+            return html.Div(
+                badges,
+                style={"marginTop": "0.5rem", "display": "flex", "alignItems": "center"},
+            )
+
+        # Add summary to each bucket
+        lt7_with_summary = _with_count(lt7) + [make_summary_row(lt7_counts)]
+        w7to14_with_summary = _with_count(w7to14) + [make_summary_row(w7to14_counts)]
+        w14to21_with_summary = _with_count(w14to21) + [make_summary_row(w14to21_counts)]
+        gt21_with_summary = _with_count(gt21) + [make_summary_row(gt21_counts)]
+
+        return lt7_with_summary, w7to14_with_summary, w14to21_with_summary, gt21_with_summary
 
     # ---- Settings callbacks ----
 
@@ -1469,7 +1624,6 @@ def register_all_callbacks(dash_app):
 
             status = status_data.get("status")
             current_step = status_data.get("current_step", 0)
-            step_name = status_data.get("step_name", "")
             completed = status_data.get("completed_steps", [])
             error = status_data.get("error")
 
@@ -1593,6 +1747,142 @@ def register_all_callbacks(dash_app):
             )
 
         return symbols, tags, status_msg
+
+    # ---- Account Sync Status ----
+    @dash_app.callback(
+        Output("account-sync-status", "children"),
+        Input("main-tabs", "active_tab"),
+        Input("accounts-store", "data"),
+    )
+    def update_account_sync_status(active_tab, accounts):
+        """Fetch and display account sync status in Settings tab."""
+        if active_tab != "settings":
+            return dash.no_update
+
+        try:
+            data = _api_get("/api/sync/account-status", timeout=10)
+            if not data or not data.get("accounts"):
+                return html.Small("No accounts configured", style={"color": TEXT_SECONDARY})
+
+            accounts_list = data["accounts"]
+            rows = []
+            for acct in accounts_list:
+                last_flex = acct.get("last_flex_update")
+                if last_flex:
+                    age = _format_age(last_flex)
+                    flex_display = html.Span(age, style={"color": TEXT_SECONDARY, "fontSize": "0.75rem"})
+                else:
+                    flex_display = html.Span("Never", style={"color": ACCENT_WARN, "fontSize": "0.75rem"})
+
+                enabled_badge = dbc.Badge(
+                    "Enabled" if acct.get("enabled") else "Disabled",
+                    color="success" if acct.get("enabled") else "secondary",
+                    style={"fontSize": "0.7rem"},
+                )
+
+                pos_count = acct.get("position_count", 0)
+                pos_color = ACCENT_PROFIT if pos_count > 0 else TEXT_SECONDARY
+
+                rows.append(
+                    html.Div(
+                        [
+                            html.Span(acct["name"], style={"color": TEXT_PRIMARY, "fontWeight": 600, "width": "25%", "display": "inline-block"}),
+                            html.Span(f"{pos_count} pos", style={"color": pos_color, "fontSize": "0.8rem", "width": "15%", "display": "inline-block"}),
+                            enabled_badge,
+                            html.Span("Flex: ", style={"color": TEXT_SECONDARY, "fontSize": "0.75rem", "marginLeft": "1rem"}),
+                            flex_display,
+                        ],
+                        style={
+                            "padding": "0.5rem 0",
+                            "borderBottom": f"1px solid {BORDER}",
+                            "display": "flex",
+                            "alignItems": "center",
+                        },
+                    )
+                )
+
+            return html.Div(rows, style={"width": "100%"})
+
+        except Exception as e:
+            return html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})
+
+    # ---- Price Sync Status ----
+    @dash_app.callback(
+        Output("price-sync-status", "children"),
+        Input("main-tabs", "active_tab"),
+    )
+    def update_price_sync_status(active_tab):
+        """Fetch and display price sync status in Settings tab."""
+        if active_tab != "settings":
+            return dash.no_update
+
+        try:
+            data = _api_get("/api/sync/price-status", timeout=10)
+            if not data or not data.get("symbols"):
+                return html.Small("No positions loaded", style={"color": TEXT_SECONDARY})
+
+            symbols_list = data["symbols"]
+            last_sync = data.get("last_price_sync")
+            sync_age = _format_age(last_sync) if last_sync else "Never"
+
+            header = html.Div(
+                [
+                    html.Span("Symbol", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "20%", "display": "inline-block", "fontWeight": 600}),
+                    html.Span("Price", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "20%", "display": "inline-block", "fontWeight": 600}),
+                    html.Span("Options", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "15%", "display": "inline-block", "fontWeight": 600}),
+                    html.Span("Last Update", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "25%", "display": "inline-block", "fontWeight": 600}),
+                ],
+                style={
+                    "paddingBottom": "0.5rem",
+                    "borderBottom": f"2px solid {BORDER}",
+                    "display": "flex",
+                },
+            )
+
+            rows = []
+            for sym in symbols_list:
+                price = sym.get("price")
+                opt_count = sym.get("option_count", 0)
+                last_updated = sym.get("last_updated")
+
+                price_str = f"${price:.2f}" if price is not None else "N/A"
+                price_color = TEXT_PRIMARY if price is not None else ACCENT_WARN
+
+                if last_updated:
+                    age = _format_age(last_updated)
+                    age_color = ACCENT_PROFIT if "just now" in age or "h ago" in age and int(age.split("h")[0]) < 24 else ACCENT_WARN
+                else:
+                    age = "Never"
+                    age_color = ACCENT_LOSS
+
+                rows.append(
+                    html.Div(
+                        [
+                            html.Span(sym["symbol"], style={"color": TEXT_PRIMARY, "fontWeight": 600, "width": "20%", "display": "inline-block"}),
+                            html.Span(price_str, style={"color": price_color, "fontSize": "0.85rem", "width": "20%", "display": "inline-block"}),
+                            html.Span(str(opt_count), style={"color": TEXT_SECONDARY, "fontSize": "0.85rem", "width": "15%", "display": "inline-block"}),
+                            html.Span(age, style={"color": age_color, "fontSize": "0.75rem", "width": "25%", "display": "inline-block"}),
+                        ],
+                        style={
+                            "padding": "0.5rem 0",
+                            "borderBottom": f"1px solid {BORDER}",
+                            "display": "flex",
+                            "alignItems": "center",
+                        },
+                    )
+                )
+
+            footer = html.Div(
+                [
+                    html.Span(f"Last price sync: {sync_age}", style={"color": TEXT_SECONDARY, "fontSize": "0.75rem"}),
+                ],
+                style={"marginTop": "0.5rem"},
+            )
+
+            return html.Div([header] + rows + [footer], style={"width": "100%"})
+
+        except Exception as e:
+            return html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})
 
     # ---- Screener Cache Reader ----
     @dash_app.callback(
