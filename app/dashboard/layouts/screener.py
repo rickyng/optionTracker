@@ -18,7 +18,6 @@ from app.dashboard.tokens import (
 def screener_layout():
     return html.Div(
         [
-            dcc.Loading(id="scan-loading", type="default", children=html.Div(id="scan-loading-inner")),
             # Header
             html.Div(
                 [
@@ -30,24 +29,8 @@ def screener_layout():
                             "color": TEXT_PRIMARY,
                         },
                     ),
-                    html.Button(
-                        "Scan",
-                        id="scan-btn",
-                        n_clicks=0,
-                        style={
-                            "backgroundColor": ACCENT_INFO,
-                            "color": "#0f0f1a",
-                            "border": "none",
-                            "borderRadius": "6px",
-                            "padding": "0.4rem 1.2rem",
-                            "fontWeight": 600,
-                            "fontSize": "0.85rem",
-                            "cursor": "pointer",
-                            "marginLeft": "1rem",
-                        },
-                    ),
                     html.Span(
-                        id="scan-status",
+                        id="screener-data-age",
                         style={
                             "fontSize": "0.8rem",
                             "color": TEXT_SECONDARY,
@@ -59,69 +42,6 @@ def screener_layout():
             ),
             # Summary KPI cards
             html.Div(id="screener-summary-cards", className="mb-3"),
-            # Watchlist (collapsible)
-            html.Details(
-                [
-                    html.Summary(
-                        "Watchlist",
-                        style={
-                            "cursor": "pointer",
-                            "color": TEXT_SECONDARY,
-                            "fontWeight": 600,
-                            "fontSize": "0.85rem",
-                            "marginBottom": "0.5rem",
-                        },
-                    ),
-                    html.Div(
-                        [
-                            html.Div(id="watchlist-tags", className="mb-2"),
-                            html.Div(
-                                [
-                                    dcc.Input(
-                                        id="add-symbol-input",
-                                        type="text",
-                                        placeholder="e.g. AAPL",
-                                        maxLength=10,
-                                        style={
-                                            "backgroundColor": BG_CARD_HEADER,
-                                            "border": f"1px solid {BORDER}",
-                                            "borderRadius": "4px",
-                                            "color": TEXT_PRIMARY,
-                                            "padding": "0.3rem 0.6rem",
-                                            "fontSize": "0.85rem",
-                                            "width": "120px",
-                                        },
-                                    ),
-                                    html.Button(
-                                        "Add",
-                                        id="add-symbol-btn",
-                                        n_clicks=0,
-                                        style={
-                                            "backgroundColor": ACCENT_PROFIT,
-                                            "color": "#0f0f1a",
-                                            "border": "none",
-                                            "borderRadius": "4px",
-                                            "padding": "0.3rem 0.8rem",
-                                            "fontWeight": 600,
-                                            "fontSize": "0.8rem",
-                                            "cursor": "pointer",
-                                            "marginLeft": "0.5rem",
-                                        },
-                                    ),
-                                    html.Span(
-                                        id="add-symbol-status",
-                                        style={"fontSize": "0.75rem", "color": ACCENT_WARN, "marginLeft": "0.5rem"},
-                                    ),
-                                ],
-                                className="d-flex align-items-center",
-                            ),
-                        ],
-                        style={"padding": "0.5rem 0"},
-                    ),
-                ],
-                style={"marginBottom": "1rem"},
-                open=True,
-            ),
             # Strategy Presets (collapsible)
             html.Details(
                 [

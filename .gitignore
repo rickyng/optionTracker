@@ -12,3 +12,4 @@ build/
 htmlcov/
 .coverage
 downloads/
+.claude/worktrees/

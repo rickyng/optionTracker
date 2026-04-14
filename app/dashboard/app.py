@@ -168,17 +168,17 @@ def create_dash_app(fastapi_app):
             dbc.Container(
                 [
                     dcc.Store(id="risk-cap-pct", data=30),
-                    dcc.Store(id="sync-job-ids", data=[]),
                     dcc.Store(id="accounts-store", data=[]),
                     dcc.Store(id="user-store", data={}),
                     dcc.Store(id="positions-store", data=[]),
                     dcc.Store(id="screener-results-store", data={}),
                     dcc.Store(id="screener-watchlist-store", data=[]),
                     dcc.Store(id="screener-filters-store", data={}),
-                    dcc.Store(id="scan-job-store", data={}),
-                    dcc.Interval(id="sync-poll-interval", interval=5000, disabled=True),
-                    dcc.Interval(id="scan-poll-interval", interval=5000, disabled=True),
+                    dcc.Store(id="sync-status-store", data={}),
+                    dcc.Interval(id="sync-banner-poll-interval", interval=3000, disabled=True),
                     dcc.Interval(id="boot-interval", interval=100, max_intervals=1, disabled=False),
+                    # ── Global Sync Banner ────────────────────────────────────────
+                    html.Div(id="sync-status-banner", style={"marginBottom": "0.5rem"}),
                     dbc.Tabs(
                         [
                             dbc.Tab(label="Overview", tab_id="overview"),

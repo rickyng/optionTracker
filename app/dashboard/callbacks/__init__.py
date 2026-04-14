@@ -3,7 +3,6 @@ import logging
 import os
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 import dash
@@ -256,10 +255,6 @@ def register_all_callbacks(dash_app):
     def update_overview(account_val, cap_pct, market_val):
         cap_pct = cap_pct or 30
         try:
-            # Trigger yfinance refresh if data is stale (instant no-op if fresh today)
-            with contextlib.suppress(Exception):
-                _api_post("/api/prices/refresh", timeout=15)
-
             params = _filter_params(account_val, market_val)
             params["risk_margin_pct"] = cap_pct
 
@@ -492,27 +487,6 @@ def register_all_callbacks(dash_app):
             return cards, exposure_table
         except Exception as e:
             return html.Div(f"Error loading overview: {e}"), html.Div("")
-
-    # ---- Refresh Market Data callback ----
-    @dash_app.callback(
-        Output("refresh-prices-status", "children"),
-        Input("refresh-prices-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def refresh_prices(n_clicks):
-        if not n_clicks:
-            return ""
-        try:
-            resp = _api_post("/api/prices/refresh", timeout=180)
-            if resp is None:
-                return "Error: refresh failed"
-            data = resp.json()
-            refreshed = data.get("refreshed", 0)
-            if refreshed == 0:
-                return "All data fresh"
-            return f"Updated {refreshed} symbols"
-        except Exception as e:
-            return f"Error: {e}"
 
     # ---- Positions data loader ----
     @dash_app.callback(
@@ -1002,177 +976,6 @@ def register_all_callbacks(dash_app):
         except Exception as e:
             return html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})
 
-    _max_poll_attempts = 30
-
-    @dash_app.callback(
-        Output("sync-job-ids", "data"),
-        Output("sync-jobs-list", "children"),
-        Output("sync-poll-interval", "disabled"),
-        Input("sync-all-btn", "n_clicks"),
-        Input("sync-poll-interval", "n_intervals"),
-        State("sync-job-ids", "data"),
-        prevent_initial_call=True,
-    )
-    def handle_sync(n_clicks, n_intervals, store_data):
-        ctx = dash.callback_context
-        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-        current_job_ids = (store_data or {}).get("ids", [])
-        attempts = (store_data or {}).get("attempts", 0)
-        _logger.info("handle_sync triggered=%s jobs=%s attempts=%s", triggered, current_job_ids, attempts)
-
-        # Case 1: Button click — trigger downloads (guard against DOM-mount trigger)
-        if triggered == "sync-all-btn.n_clicks" and n_clicks:
-            try:
-                _logger.info("POST /api/flex/download")
-                resp = _api_post("/api/flex/download", timeout=15)
-                if resp is None:
-                    return (
-                        {},
-                        [html.Small("Failed to trigger download (network error)", style={"color": ACCENT_LOSS})],
-                        [],
-                        True,
-                    )
-                _logger.info("POST response: status=%s body=%s", resp.status_code, resp.text[:500])
-                if not resp.ok:
-                    return (
-                        {},
-                        [
-                            html.Small(
-                                f"API error {resp.status_code}: {resp.text[:200]}",
-                                style={"color": ACCENT_LOSS},
-                            )
-                        ],
-                        True,
-                    )
-                result = resp.json()
-                jobs = result.get("jobs", [])
-                _logger.info("Started %d jobs: %s", len(jobs), [j["job_id"] for j in jobs])
-                cards = []
-                job_ids = []
-                for j in jobs:
-                    job_ids.append(j["job_id"])
-                    cards.append(
-                        dbc.Card(
-                            [
-                                dbc.CardBody(
-                                    [
-                                        html.Strong(j["account_name"], style={"color": TEXT_PRIMARY}),
-                                        html.Span(
-                                            " — Pending...", style={"color": ACCENT_WARN, "marginLeft": "0.5rem"}
-                                        ),
-                                    ]
-                                ),
-                            ],
-                            style={
-                                "backgroundColor": BG_CARD,
-                                "border": f"1px solid {BORDER}",
-                                "borderRadius": "8px",
-                            },
-                            className="mb-1",
-                        )
-                    )
-                return {"ids": job_ids, "attempts": 0, "statuses": {}, "fail_counts": {}}, cards, len(job_ids) == 0
-            except Exception as e:
-                _logger.exception("handle_sync button click failed")
-                return {}, [html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})], True
-
-        # Case 2: Interval tick — poll for status
-        if not current_job_ids:
-            return dash.no_update, dash.no_update, True
-
-        attempts += 1
-        timed_out = attempts >= _max_poll_attempts
-        last_statuses = (store_data or {}).get("statuses", {})
-        fail_counts: dict = (store_data or {}).get("fail_counts", {})
-
-        headers = _get_user_headers()
-        _logger.info(
-            "Polling %d jobs (attempt %d/%d): %s", len(current_job_ids), attempts, _max_poll_attempts, current_job_ids
-        )
-
-        def _fetch_job(job_id):
-            try:
-                resp = requests.get(f"{API_BASE}/api/flex/download/{job_id}", headers=headers, timeout=45)
-                _logger.info("Poll %s: status=%s body=%s", job_id, resp.status_code, resp.text[:200])
-                return job_id, resp.json()
-            except (requests.Timeout, requests.ConnectionError) as e:
-                _logger.warning("Poll %s network error (will retry): %s", job_id, e)
-                return job_id, None
-            except Exception as e:
-                _logger.warning("Poll %s failed: %s", job_id, e)
-                return job_id, None
-
-        results: dict[str, dict] = {}
-        with ThreadPoolExecutor() as pool:
-            futures = {pool.submit(_fetch_job, jid): jid for jid in current_job_ids}
-            for future in as_completed(futures):
-                jid, data = future.result()
-                results[jid] = data
-
-        cards = []
-        all_done = True
-        for job_id in current_job_ids:
-            data = results.get(job_id)
-            poll_failed = data is None
-            if not poll_failed:
-                status = data.get("status", "unknown")
-                last_statuses[job_id] = data
-                fail_counts[job_id] = 0
-            else:
-                # Poll failed — reuse last-known result if available
-                data = last_statuses.get(job_id, {"status": "unknown"})
-                status = data.get("status", "unknown")
-                fail_counts[job_id] = fail_counts.get(job_id, 0) + 1
-            if status == "completed":
-                badge = dbc.Badge("Completed", color="success")
-                detail = html.Small(
-                    f" — {data.get('positions_imported', 0)} positions, {data.get('trades_imported', 0)} trades",
-                    style={"color": TEXT_SECONDARY, "marginLeft": "0.5rem"},
-                )
-            elif status == "failed":
-                badge = dbc.Badge("Failed", color="danger")
-                detail = html.Small(
-                    f" — {data.get('error', 'Unknown error')}", style={"color": ACCENT_LOSS, "marginLeft": "0.5rem"}
-                )
-            elif timed_out:
-                badge = dbc.Badge("Timed Out", color="secondary")
-                detail = html.Small(
-                    " — Max poll attempts reached", style={"color": TEXT_SECONDARY, "marginLeft": "0.5rem"}
-                )
-            else:
-                all_done = False
-                label = {"requesting": "Requesting...", "polling": "Polling..."}.get(status, "Pending...")
-                badge = dbc.Badge(label, color="warning")
-                retry_count = fail_counts.get(job_id, 0)
-                detail = html.Small(
-                    f" — retrying ({retry_count})" if retry_count else "",
-                    style={"color": ACCENT_WARN, "marginLeft": "0.5rem"},
-                )
-
-            cards.append(
-                dbc.Card(
-                    [
-                        dbc.CardBody([html.Strong(job_id, style={"color": TEXT_PRIMARY}), badge, detail]),
-                    ],
-                    style={
-                        "backgroundColor": BG_CARD,
-                        "border": f"1px solid {BORDER}",
-                        "borderRadius": "8px",
-                    },
-                    className="mb-1",
-                )
-            )
-
-        # Stop polling if all done or timed out
-        stop = all_done or timed_out
-        new_store = {
-            "ids": current_job_ids,
-            "attempts": attempts,
-            "statuses": last_statuses,
-            "fail_counts": fail_counts,
-        }
-        return new_store, cards, stop
-
     # ---- User Menu callback ----
     @dash_app.callback(
         Output("user-menu", "children"),
@@ -1300,96 +1103,6 @@ def register_all_callbacks(dash_app):
             None,
         )
 
-    # ---- Watchlist callbacks ----
-
-    @dash_app.callback(
-        Output("screener-watchlist-store", "data"),
-        Output("add-symbol-status", "children"),
-        Input("main-tabs", "active_tab"),
-        Input("add-symbol-btn", "n_clicks"),
-        Input({"type": "remove-symbol-btn", "index": dash.dependencies.ALL}, "n_clicks"),
-        State("add-symbol-input", "value"),
-        prevent_initial_call=True,
-    )
-    def manage_watchlist(active_tab, add_clicks, remove_clicks, new_symbol):
-        ctx = dash.callback_context
-        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-
-        status_msg = ""
-
-        # Remove symbol
-        if "remove-symbol-btn" in triggered:
-            triggered_id = dash.callback_context.triggered_id
-            if isinstance(triggered_id, dict) and triggered_id.get("type") == "remove-symbol-btn":
-                sym = triggered_id["index"]
-                try:
-                    _api_delete(f"/api/screener/watchlist/{sym}")
-                    status_msg = f"Removed {sym}"
-                except Exception as e:
-                    status_msg = f"Failed: {e}"
-
-        # Add symbol
-        elif "add-symbol-btn" in triggered and add_clicks and new_symbol:
-            symbol_upper = new_symbol.strip().upper()
-            if not symbol_upper:
-                status_msg = "Enter a symbol"
-            else:
-                try:
-                    resp = _api_post("/api/screener/watchlist", json={"symbol": symbol_upper})
-                    if resp and resp.ok:
-                        status_msg = f"Added {symbol_upper}"
-                    elif resp:
-                        detail = resp.json().get("detail", resp.text[:50])
-                        status_msg = detail
-                    else:
-                        status_msg = "Network error"
-                except Exception as e:
-                    status_msg = f"Failed: {e}"
-
-        # Fetch current watchlist
-        data = _api_get("/api/screener/watchlist")
-        symbols = data.get("symbols", []) if data else []
-
-        return symbols, status_msg
-
-    @dash_app.callback(
-        Output("watchlist-tags", "children"),
-        Input("screener-watchlist-store", "data"),
-    )
-    def render_watchlist_tags(symbols):
-        if not symbols:
-            return []
-        tags = []
-        for sym in symbols:
-            tags.append(
-                html.Span(
-                    [
-                        html.Span(sym, style={"marginRight": "0.3rem"}),
-                        html.Span(
-                            "x",
-                            id={"type": "remove-symbol-btn", "index": sym},
-                            style={
-                                "cursor": "pointer",
-                                "fontWeight": 700,
-                                "fontSize": "0.7rem",
-                                "color": TEXT_SECONDARY,
-                            },
-                        ),
-                    ],
-                    style={
-                        "backgroundColor": BG_CARD_HEADER,
-                        "border": f"1px solid {BORDER}",
-                        "borderRadius": "4px",
-                        "padding": "0.2rem 0.5rem",
-                        "fontSize": "0.8rem",
-                        "color": TEXT_PRIMARY,
-                        "marginRight": "0.4rem",
-                        "display": "inline-block",
-                    },
-                )
-            )
-        return tags
-
     @dash_app.callback(
         Output("filter-min-iv", "value"),
         Output("filter-min-delta", "value"),
@@ -1424,181 +1137,6 @@ def register_all_callbacks(dash_app):
             saved.get("min_otm", 5),
             saved.get("min_roc", 12),
             saved.get("max_capital", 50000),
-        )
-
-    _max_scan_poll_attempts = 120
-
-    @dash_app.callback(
-        Output("scan-job-store", "data"),
-        Output("scan-status", "children"),
-        Output("scan-poll-interval", "disabled"),
-        Output("screener-filters-store", "data"),
-        Output("screener-results-store", "data"),
-        Input("scan-btn", "n_clicks"),
-        Input("scan-poll-interval", "n_intervals"),
-        State("filter-min-iv", "value"),
-        State("filter-min-delta", "value"),
-        State("filter-max-delta", "value"),
-        State("filter-min-dte", "value"),
-        State("filter-max-dte", "value"),
-        State("filter-min-otm", "value"),
-        State("filter-min-roc", "value"),
-        State("filter-max-capital", "value"),
-        State("scan-job-store", "data"),
-        prevent_initial_call=True,
-    )
-    def handle_scan(
-        n_clicks,
-        n_intervals,
-        min_iv,
-        min_delta,
-        max_delta,
-        min_dte,
-        max_dte,
-        min_otm,
-        min_roc,
-        max_capital,
-        store_data,
-    ):
-        ctx = dash.callback_context
-        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-
-        # Save filter values for restoration on tab switch
-        saved_filters = {
-            "min_iv": min_iv,
-            "min_delta": min_delta,
-            "max_delta": max_delta,
-            "min_dte": min_dte,
-            "max_dte": max_dte,
-            "min_otm": min_otm,
-            "min_roc": min_roc,
-            "max_capital": max_capital,
-        }
-
-        # Case 1: Button click — trigger scan
-        if triggered == "scan-btn.n_clicks" and n_clicks:
-            payload = {}
-            if min_iv is not None:
-                payload["min_iv"] = min_iv / 100
-            if min_delta is not None:
-                payload["min_delta"] = min_delta
-            if max_delta is not None:
-                payload["max_delta"] = max_delta
-            if min_dte is not None:
-                payload["min_dte"] = min_dte
-            if max_dte is not None:
-                payload["max_dte"] = max_dte
-            if min_otm is not None:
-                payload["min_otm_pct"] = min_otm
-            if min_roc is not None:
-                payload["min_ann_roc"] = min_roc
-            if max_capital is not None:
-                payload["max_capital"] = max_capital
-
-            try:
-                resp = _api_post("/api/screener/scan", json=payload, timeout=15)
-                if resp is None:
-                    return {}, "Error: network error", True, saved_filters, dash.no_update
-                data = resp.json()
-                job_id = data.get("job_id")
-                if not job_id:
-                    return {}, "No job started", True, saved_filters, dash.no_update
-                return (
-                    {"job_id": job_id, "attempts": 0},
-                    f"Starting scan ({data.get('watchlist_count', '?')} tickers)...",
-                    False,
-                    saved_filters,
-                    dash.no_update,
-                )
-            except Exception as e:
-                return {}, f"Error: {e}", True, saved_filters, dash.no_update
-
-        # Case 2: Interval tick — poll for status
-        store = store_data or {}
-        job_id = store.get("job_id")
-        if not job_id:
-            return dash.no_update, dash.no_update, True, dash.no_update, dash.no_update
-
-        attempts = store.get("attempts", 0) + 1
-        timed_out = attempts >= _max_scan_poll_attempts
-
-        try:
-            data = _api_get(f"/api/screener/scan/{job_id}", timeout=45)
-            if data is None:
-                raise RuntimeError("Network error polling scan job")
-        except Exception as e:
-            if timed_out:
-                return store, f"Timed out: {e}", True, saved_filters, dash.no_update
-            store["attempts"] = attempts
-            return store, f"Poll failed, retrying ({attempts})...", dash.no_update, saved_filters, dash.no_update
-
-        status = data.get("status", "unknown")
-        progress = data.get("progress", "")
-        current_ticker = data.get("current_ticker") or ""
-
-        if status == "completed":
-            results = data.get("results", [])
-            failed = data.get("failed_tickers", [])
-            scan_data = {"results": results}
-            # Inject summary fields for update_screener_summary
-            results_count = len(results)
-            total_capital = sum(r.get("capital_required", 0) for r in results)
-            avg_iv = sum(r.get("iv", 0) for r in results) / results_count if results_count else 0
-            scan_data["watchlist_count"] = data.get("total_tickers", 0)
-            scan_data["opportunities_found"] = results_count
-            scan_data["failed_tickers"] = failed
-            scan_data["avg_iv"] = avg_iv
-            scan_data["total_capital"] = total_capital
-            scan_data["scanned_at"] = ""
-
-            status_text = f"Found {results_count} opportunities"
-            if failed:
-                status_text += f" ({len(failed)} failed: {', '.join(failed)})"
-            return (
-                {"job_id": job_id, "attempts": attempts, "results": scan_data},
-                status_text,
-                True,
-                saved_filters,
-                scan_data,
-            )
-
-        if status == "failed":
-            error = data.get("error", "Unknown error")
-            return store, f"Scan failed: {error}", True, saved_filters, dash.no_update
-
-        if timed_out:
-            return store, "Scan timed out", True, saved_filters, dash.no_update
-
-        # Still running
-        ticker_info = f" ({current_ticker})" if current_ticker else ""
-        store["attempts"] = attempts
-        return store, f"Scanning{ticker_info} {progress}...", dash.no_update, saved_filters, dash.no_update
-
-    @dash_app.callback(
-        Output("screener-summary-cards", "children"),
-        Input("screener-results-store", "data"),
-    )
-    def update_screener_summary(scan_data):
-        results = scan_data.get("results", [])
-        if not results:
-            return html.Small("Click Scan to find CSP opportunities.", style={"color": TEXT_SECONDARY})
-
-        watchlist_count = scan_data.get("watchlist_count", 0)
-        total_capital = sum(r.get("capital_required", 0) for r in results)
-        avg_iv = sum(r.get("iv", 0) for r in results) / len(results) if results else 0
-
-        return dbc.Row(
-            [
-                dbc.Col(kpi_card("Watchlist", str(watchlist_count), ACCENT_INFO), lg=2, sm=6),
-                dbc.Col(kpi_card("Opportunities", str(len(results)), ACCENT_PROFIT), lg=2, sm=6),
-                dbc.Col(kpi_card("Avg IV", f"{avg_iv * 100:.1f}%", ACCENT_WARN), lg=2, sm=6),
-                dbc.Col(kpi_card("Total Capital", fmt_money(total_capital), ACCENT_PROFIT), lg=2, sm=6),
-                dbc.Col(
-                    kpi_card("Scanned", scan_data.get("scanned_at", "")[:19].replace("T", " "), TEXT_SECONDARY),
-                    lg=4,
-                    sm=6,
-                ),
-            ]
         )
 
     @dash_app.callback(
@@ -1784,3 +1322,368 @@ def register_all_callbacks(dash_app):
                 ),
             ]
         ), detail_style
+
+    # ---- Global Sync Banner ----
+    @dash_app.callback(
+        Output("sync-status-banner", "children"),
+        Output("sync-banner-poll-interval", "disabled"),
+        Input("sync-status-store", "data"),
+        Input("sync-banner-poll-interval", "n_intervals"),
+        Input("main-tabs", "active_tab"),
+    )
+    def render_sync_banner(status_data, n_intervals, active_tab):
+        """Render global sync status banner across all tabs."""
+        if not status_data:
+            # No sync job — show last sync time from API
+            try:
+                last_sync = _api_get("/api/sync/last-sync")
+                if last_sync and last_sync.get("last_sync"):
+                    ts = last_sync["last_sync"]
+                    age = _format_age(ts)
+                    return html.Div(
+                        [
+                            html.Span(f"Data synced {age}", style={"color": TEXT_SECONDARY, "fontSize": "0.8rem"}),
+                            html.A(
+                                "Refresh",
+                                href="/dashboard",
+                                style={"color": TEXT_ACCENT, "fontSize": "0.8rem", "marginLeft": "0.5rem"},
+                            ),
+                        ],
+                        style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
+                    ), True
+            except Exception:
+                pass
+            return html.Div(), True
+
+        status = status_data.get("status", "")
+        current_step = status_data.get("current_step", 0)
+        step_name = status_data.get("step_name", "")
+        error = status_data.get("error")
+
+        if status == "syncing" or status == "running":
+            # Show progress
+            return html.Div(
+                [
+                    dbc.Spinner(size="sm", color="primary"),
+                    html.Span(f" Syncing {step_name} ({current_step}/4)...", style={"color": TEXT_PRIMARY, "fontSize": "0.85rem"}),
+                ],
+                style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
+            ), False  # Keep polling
+
+        if status == "retrying":
+            retry_count = status_data.get("retry_count", 0)
+            return html.Div(
+                [
+                    dbc.Spinner(size="sm", color="warning"),
+                    html.Span(f" Retrying {step_name} ({retry_count}/3)...", style={"color": ACCENT_WARN, "fontSize": "0.85rem"}),
+                ],
+                style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
+            ), False
+
+        if status == "completed":
+            last_sync = status_data.get("last_sync")
+            if last_sync:
+                age = _format_age(last_sync)
+                return html.Div(
+                    [
+                        html.Span(f"Data synced {age}", style={"color": ACCENT_PROFIT, "fontSize": "0.85rem"}),
+                        html.Span(" ✓", style={"color": ACCENT_PROFIT}),
+                    ],
+                    style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
+                ), True
+
+        if status == "error":
+            return html.Div(
+                [
+                    html.Span(f"Sync failed: {error}", style={"color": ACCENT_LOSS, "fontSize": "0.85rem"}),
+                    html.A("Retry", href="/dashboard", style={"color": TEXT_ACCENT, "marginLeft": "0.5rem"}),
+                ],
+                style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
+            ), True
+
+        return html.Div(), True
+
+    # ---- Sync All Data Pipeline ----
+    _max_sync_poll_attempts = 100
+
+    @dash_app.callback(
+        Output("sync-status-store", "data"),
+        Output("sync-progress-list", "children"),
+        Output("sync-last-time", "children"),
+        Output("sync-banner-poll-interval", "disabled"),
+        Output("settings-stale-check", "disabled"),
+        Input("sync-all-data-btn", "n_clicks"),
+        Input("sync-banner-poll-interval", "n_intervals"),
+        Input("settings-stale-check", "n_intervals"),
+        State("sync-status-store", "data"),
+        prevent_initial_call=True,
+    )
+    def handle_sync_pipeline(btn_clicks, poll_intervals, stale_check, store_data):
+        """Handle Sync All Data button + polling."""
+        ctx = dash.callback_context
+        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+
+        # Case 1: Stale check on settings tab load — auto-trigger if data is old
+        if triggered == "settings-stale-check.n_intervals":
+            try:
+                last_sync = _api_get("/api/sync/last-sync")
+                if last_sync and last_sync.get("last_sync"):
+                    ts = last_sync["last_sync"]
+                    age_hours = _get_age_hours(ts)
+                    if age_hours >= 24:
+                        # Auto-trigger sync
+                        resp = _api_post("/api/sync/all", timeout=10)
+                        if resp and resp.ok:
+                            data = resp.json()
+                            job_id = data.get("job_id")
+                            return {"job_id": job_id, "status": "pending"}, [], f"Last: {ts[:19]} (stale)", False, True
+                # Data fresh or no last_sync
+                return dash.no_update, dash.no_update, dash.no_update, True, True
+            except Exception:
+                return dash.no_update, dash.no_update, dash.no_update, True, True
+
+        # Case 2: Button click — trigger sync
+        if triggered == "sync-all-data-btn.n_clicks" and btn_clicks:
+            try:
+                resp = _api_post("/api/sync/all", json={"force": False}, timeout=10)
+                if resp is None:
+                    return {}, [html.Small("Network error", style={"color": ACCENT_LOSS})], "", True, dash.no_update
+                if not resp.ok:
+                    return {}, [html.Small(f"Error: {resp.status_code}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
+                data = resp.json()
+                job_id = data.get("job_id")
+                return {"job_id": job_id, "status": "pending"}, [], "", False, dash.no_update
+            except Exception as e:
+                return {}, [html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
+
+        # Case 3: Poll interval — fetch job status
+        job_id = (store_data or {}).get("job_id")
+        if not job_id:
+            return dash.no_update, dash.no_update, dash.no_update, True, dash.no_update
+
+        try:
+            status_data = _api_get(f"/api/sync/status/{job_id}", timeout=10)
+            if not status_data:
+                # Poll failed — retry
+                return store_data, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+
+            status = status_data.get("status")
+            current_step = status_data.get("current_step", 0)
+            step_name = status_data.get("step_name", "")
+            completed = status_data.get("completed_steps", [])
+            error = status_data.get("error")
+
+            # Build progress list
+            progress_cards = []
+            for i in range(1, 5):
+                if i in completed:
+                    badge = dbc.Badge("✓", color="success")
+                elif i == current_step and status in ("running", "syncing"):
+                    badge = dbc.Spinner(size="sm", color="primary")
+                elif i == current_step and status == "retrying":
+                    badge = dbc.Badge("Retrying", color="warning")
+                elif status == "error" and i == current_step:
+                    badge = dbc.Badge("Failed", color="danger")
+                else:
+                    badge = dbc.Badge("Pending", color="secondary")
+
+                step_names = ["IBKR Flex", "Stock Prices", "Earnings Dates", "Screener Options"]
+                progress_cards.append(
+                    html.Div(
+                        [html.Span(step_names[i-1], style={"color": TEXT_PRIMARY}), badge],
+                        style={"marginRight": "1rem"},
+                    )
+                )
+
+            progress_list = html.Div(progress_cards, className="d-flex flex-wrap")
+
+            last_time = ""
+            if status == "completed":
+                last_time = f"Last: {status_data.get('last_sync', '')[:19]}"
+                return status_data, progress_list, last_time, True, dash.no_update
+
+            if status == "error":
+                return status_data, [html.Small(f"Error at step {current_step}: {error}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
+
+            # Still running
+            return status_data, progress_list, "", False, dash.no_update
+
+        except Exception as e:
+            return store_data, [html.Small(f"Poll error: {e}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
+
+    # ---- Watchlist Management (moved to Settings) ----
+    @dash_app.callback(
+        Output("screener-watchlist-store", "data"),
+        Output("settings-watchlist-tags", "children"),
+        Output("settings-add-symbol-status", "children"),
+        Input("settings-add-symbol-btn", "n_clicks"),
+        Input({"type": "settings-remove-symbol-btn", "index": dash.dependencies.ALL}, "n_clicks"),
+        State("settings-add-symbol-input", "value"),
+        prevent_initial_call=True,
+    )
+    def manage_settings_watchlist(add_clicks, remove_clicks, new_symbol):
+        """Manage watchlist from Settings tab."""
+        ctx = dash.callback_context
+        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+
+        status_msg = ""
+
+        # Remove symbol
+        if "settings-remove-symbol-btn" in triggered:
+            triggered_id = dash.callback_context.triggered_id
+            if isinstance(triggered_id, dict) and triggered_id.get("type") == "settings-remove-symbol-btn":
+                sym = triggered_id["index"]
+                try:
+                    _api_delete(f"/api/screener/watchlist/{sym}")
+                    status_msg = f"Removed {sym}"
+                except Exception as e:
+                    status_msg = f"Failed: {e}"
+
+        # Add symbol
+        elif "settings-add-symbol-btn" in triggered and add_clicks and new_symbol:
+            symbol_upper = new_symbol.strip().upper()
+            if not symbol_upper:
+                status_msg = "Enter a symbol"
+            else:
+                try:
+                    resp = _api_post("/api/screener/watchlist", json={"symbol": symbol_upper})
+                    if resp and resp.ok:
+                        status_msg = f"Added {symbol_upper}"
+                    elif resp:
+                        detail = resp.json().get("detail", resp.text[:50])
+                        status_msg = detail
+                    else:
+                        status_msg = "Network error"
+                except Exception as e:
+                    status_msg = f"Failed: {e}"
+
+        # Fetch current watchlist
+        data = _api_get("/api/screener/watchlist")
+        symbols = data.get("symbols", []) if data else []
+
+        # Build tags for settings tab
+        tags = []
+        for sym in symbols:
+            tags.append(
+                html.Span(
+                    [
+                        html.Span(sym, style={"marginRight": "0.3rem"}),
+                        html.Span(
+                            "x",
+                            id={"type": "settings-remove-symbol-btn", "index": sym},
+                            style={
+                                "cursor": "pointer",
+                                "fontWeight": 700,
+                                "fontSize": "0.7rem",
+                                "color": TEXT_SECONDARY,
+                            },
+                        ),
+                    ],
+                    style={
+                        "backgroundColor": BG_CARD_HEADER,
+                        "border": f"1px solid {BORDER}",
+                        "borderRadius": "4px",
+                        "padding": "0.2rem 0.5rem",
+                        "fontSize": "0.8rem",
+                        "color": TEXT_PRIMARY,
+                        "marginRight": "0.4rem",
+                        "display": "inline-block",
+                    },
+                )
+            )
+
+        return symbols, tags, status_msg
+
+    # ---- Screener Cache Reader ----
+    @dash_app.callback(
+        Output("screener-results-store", "data"),
+        Output("screener-data-age", "children"),
+        Output("screener-summary-cards", "children"),
+        Input("main-tabs", "active_tab"),
+        prevent_initial_call=True,
+    )
+    def load_screener_cache(active_tab):
+        """Load screener results from DB cache (no on-demand scan)."""
+        if active_tab != "suggestions":
+            return dash.no_update, dash.no_update, dash.no_update
+
+        try:
+            data = _api_get("/api/screener/results", timeout=10)
+            if not data:
+                return {}, "No cached data", html.Small("Sync in Settings tab", style={"color": TEXT_SECONDARY})
+
+            results = data.get("results", [])
+            if not results:
+                return {}, "No data", html.Small("No opportunities found", style={"color": TEXT_SECONDARY})
+
+            # Build summary cards
+            total_capital = sum(r.get("capital_required", 0) for r in results)
+            avg_iv = sum(r.get("iv", 0) for r in results) / len(results) if results else 0
+
+            # Get scanned_at from most recent result
+            scanned_at = results[0].get("scanned_at", "") if results else ""
+
+            scan_data = {
+                "results": results,
+                "watchlist_count": len(set(r.get("symbol") for r in results)),
+                "opportunities_found": len(results),
+                "avg_iv": avg_iv,
+                "total_capital": total_capital,
+                "scanned_at": scanned_at,
+            }
+
+            age_str = ""
+            if scanned_at:
+                age = _format_age(scanned_at)
+                age_str = f"({age})"
+
+            summary = dbc.Row(
+                [
+                    dbc.Col(kpi_card("Watchlist", str(scan_data["watchlist_count"]), ACCENT_INFO), lg=2, sm=6),
+                    dbc.Col(kpi_card("Opportunities", str(len(results)), ACCENT_PROFIT), lg=2, sm=6),
+                    dbc.Col(kpi_card("Avg IV", f"{avg_iv * 100:.1f}%", ACCENT_WARN), lg=2, sm=6),
+                    dbc.Col(kpi_card("Total Capital", fmt_money(total_capital), ACCENT_PROFIT), lg=2, sm=6),
+                    dbc.Col(
+                        kpi_card("Scanned", scanned_at[:19].replace("T", " "), TEXT_SECONDARY),
+                        lg=4,
+                        sm=6,
+                    ),
+                ]
+            )
+
+            return scan_data, age_str, summary
+
+        except Exception as e:
+            return {}, f"Error: {e}", html.Small(str(e), style={"color": ACCENT_LOSS})
+
+
+def _format_age(ts_str: str) -> str:
+    """Format timestamp as human-readable age."""
+    try:
+        from datetime import datetime
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
+        diff = now - ts
+        hours = int(diff.total_seconds() / 3600)
+        if hours < 1:
+            return "just now"
+        if hours == 1:
+            return "1h ago"
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        return f"{days}d ago"
+    except Exception:
+        return "unknown"
+
+
+def _get_age_hours(ts_str: str) -> int:
+    """Get age in hours from timestamp."""
+    try:
+        from datetime import datetime
+        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
+        diff = now - ts
+        return int(diff.total_seconds() / 3600)
+    except Exception:
+        return 999

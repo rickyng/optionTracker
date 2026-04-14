@@ -17,6 +17,7 @@ from app.api.positions import router as positions_router
 from app.api.prices import router as prices_router
 from app.api.reports import router as reports_router
 from app.api.screener import router as screener_router
+from app.api.sync import router as sync_router
 from app.api.strategies import router as strategies_router
 from app.auth.config import auth_settings
 from app.auth.routes import router as auth_router
@@ -65,6 +66,7 @@ app.include_router(prices_router)
 app.include_router(reports_router)
 app.include_router(dashboard_router)
 app.include_router(screener_router)
+app.include_router(sync_router)
 
 # Mount Dash dashboard
 from app.dashboard.app import create_dash_app
