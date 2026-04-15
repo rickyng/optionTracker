@@ -1481,12 +1481,9 @@ def register_all_callbacks(dash_app):
     # ---- Global Sync Banner ----
     @dash_app.callback(
         Output("sync-status-banner", "children"),
-        Output("sync-banner-poll-interval", "disabled"),
         Input("sync-status-store", "data"),
-        Input("sync-banner-poll-interval", "n_intervals"),
-        Input("main-tabs", "active_tab"),
     )
-    def render_sync_banner(status_data, n_intervals, active_tab):
+    def render_sync_banner(status_data):
         """Render global sync status banner across all tabs."""
         if not status_data:
             # No sync job — show last sync time from API
@@ -1505,15 +1502,25 @@ def register_all_callbacks(dash_app):
                             ),
                         ],
                         style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
-                    ), True
+                    )
             except Exception:
                 pass
-            return html.Div(), True
+            return html.Div()
 
         status = status_data.get("status", "")
         current_step = status_data.get("current_step", 0)
         step_name = status_data.get("step_name", "")
         error = status_data.get("error")
+
+        if status == "pending":
+            # Job queued but not yet running
+            return html.Div(
+                [
+                    dbc.Spinner(size="sm", color="primary"),
+                    html.Span(" Queuing sync...", style={"color": TEXT_PRIMARY, "fontSize": "0.85rem"}),
+                ],
+                style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
+            )
 
         if status == "syncing" or status == "running":
             # Show progress
@@ -1523,7 +1530,7 @@ def register_all_callbacks(dash_app):
                     html.Span(f" Syncing {step_name} ({current_step}/4)...", style={"color": TEXT_PRIMARY, "fontSize": "0.85rem"}),
                 ],
                 style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
-            ), False  # Keep polling
+            )
 
         if status == "retrying":
             retry_count = status_data.get("retry_count", 0)
@@ -1533,7 +1540,7 @@ def register_all_callbacks(dash_app):
                     html.Span(f" Retrying {step_name} ({retry_count}/3)...", style={"color": ACCENT_WARN, "fontSize": "0.85rem"}),
                 ],
                 style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
-            ), False
+            )
 
         if status == "completed":
             last_sync = status_data.get("last_sync")
@@ -1545,7 +1552,7 @@ def register_all_callbacks(dash_app):
                         html.Span(" ✓", style={"color": ACCENT_PROFIT}),
                     ],
                     style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
-                ), True
+                )
 
         if status == "error":
             return html.Div(
@@ -1554,9 +1561,9 @@ def register_all_callbacks(dash_app):
                     html.A("Retry", href="/dashboard", style={"color": TEXT_ACCENT, "marginLeft": "0.5rem"}),
                 ],
                 style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
-            ), True
+            )
 
-        return html.Div(), True
+        return html.Div()
 
     # ---- Sync All Data Pipeline ----
     _max_sync_poll_attempts = 100
@@ -1600,7 +1607,7 @@ def register_all_callbacks(dash_app):
         # Case 2: Button click — trigger sync
         if triggered == "sync-all-data-btn.n_clicks" and btn_clicks:
             try:
-                resp = _api_post("/api/sync/all", json={"force": False}, timeout=10)
+                resp = _api_post("/api/sync/all?force=false", timeout=10)
                 if resp is None:
                     return {}, [html.Small("Network error", style={"color": ACCENT_LOSS})], "", True, dash.no_update
                 if not resp.ok:
