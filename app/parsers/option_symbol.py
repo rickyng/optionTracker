@@ -13,6 +13,8 @@ SYMBOL_MAPPING = {
     "BRKA": "BRK-A",
     "BRK.B": "BRK-B",
     "BRK.A": "BRK-A",
+    "BRK B": "BRK-B",
+    "BRK A": "BRK-A",
 }
 
 

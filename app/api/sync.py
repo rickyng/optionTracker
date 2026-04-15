@@ -1,7 +1,7 @@
 """REST endpoints for centralized sync."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_user_account_ids
@@ -106,24 +106,54 @@ async def get_price_status(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return market prices, option counts, and last update time per underlying."""
+    """Return market prices, OTM option counts, and last update time per underlying."""
     user_account_ids = await get_user_account_ids(request, db)
 
-    # Count options per underlying
-    opt_query = (
-        select(OpenOption.underlying, func.count(OpenOption.id))
+    # Single query: count OTM options per underlying
+    # OTM puts: strike < price; OTM calls: strike > price
+    otm_query = (
+        select(
+            OpenOption.underlying,
+            func.sum(
+                case(
+                    (
+                        and_(OpenOption.right == "P", OpenOption.strike < MarketPrice.price),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("otm_puts"),
+            func.sum(
+                case(
+                    (
+                        and_(OpenOption.right == "C", OpenOption.strike > MarketPrice.price),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("otm_calls"),
+        )
+        .join(MarketPrice, MarketPrice.symbol == OpenOption.underlying)
         .group_by(OpenOption.underlying)
+        .order_by(OpenOption.underlying)
     )
     if user_account_ids is not None:
-        opt_query = opt_query.where(OpenOption.account_id.in_(user_account_ids))
-    result = await db.execute(opt_query)
-    option_counts = dict(result.all())
+        otm_query = otm_query.where(OpenOption.account_id.in_(user_account_ids))
 
-    if not option_counts:
+    result = await db.execute(otm_query)
+    otm_rows = result.all()
+
+    if not otm_rows:
         return {"symbols": []}
 
+    otm_counts: dict[str, int] = {}
+    symbols: list[str] = []
+    for row in otm_rows:
+        symbol = row[0]
+        symbols.append(symbol)
+        otm_counts[symbol] = (row[1] or 0) + (row[2] or 0)
+
     # Get market prices for those underlyings
-    symbols = sorted(option_counts.keys())
     price_result = await db.execute(
         select(MarketPrice).where(MarketPrice.symbol.in_(symbols))
     )
@@ -141,7 +171,7 @@ async def get_price_status(
         symbols_data.append({
             "symbol": symbol,
             "price": price_row.price if price_row else None,
-            "option_count": option_counts[symbol],
+            "option_count": otm_counts.get(symbol, 0),
             "last_updated": price_row.updated_at if price_row else None,
         })
 

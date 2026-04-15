@@ -69,11 +69,6 @@ def _count_badge(items):
     )
 
 
-def _with_count(items):
-    """Prepend a position count badge to an expiration bucket list."""
-    return [_count_badge(items), *(items or [html.Small("None", style={"color": TEXT_SECONDARY})])]
-
-
 def _get_user_headers():
     """Build headers for internal API calls, including user identity from session cookie."""
     from flask import request as flask_request
@@ -822,17 +817,28 @@ def register_all_callbacks(dash_app):
                     else:
                         return "10% OTM", ACCENT_LOSS
 
-        lt7, w7to14, w14to21, gt21 = [], [], [], []
-        # Track counts for summary breakdown
-        lt7_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
-        w7to14_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
-        w14to21_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
-        gt21_counts = {"ITM": 0, "5% OTM": 0, "10% OTM": 0}
+        # Group positions by DTE bucket and moneyness
+        buckets = {
+            "lt7": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+            "w7to14": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+            "w14to21": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+            "gt21": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+        }
 
         for p in positions:
             try:
                 dte = p.get("days_to_expiry", 999)
                 moneyness, moneyness_color = calc_moneyness(p)
+
+                # Normalize moneyness to bucket key
+                if moneyness == "N/A":
+                    bucket_key = "N/A"
+                elif moneyness in ("ITM", "5% ITM"):
+                    bucket_key = "ITM"
+                elif moneyness in ("5% OTM", "ATM"):
+                    bucket_key = "5% OTM"
+                else:
+                    bucket_key = "10% OTM"
 
                 # Create badge for moneyness
                 moneyness_badge = dbc.Badge(
@@ -868,81 +874,73 @@ def register_all_callbacks(dash_app):
                     className="mb-1",
                 )
 
-                # Update counts for summary
-                if moneyness in ("ITM", "5% ITM"):
-                    count_key = "ITM"
-                elif moneyness in ("5% OTM", "ATM"):
-                    count_key = "5% OTM"
-                else:
-                    count_key = "10% OTM"
-
+                # Assign to DTE bucket
                 if dte < 7:
-                    lt7.append(item)
-                    lt7_counts[count_key] += 1
+                    buckets["lt7"][bucket_key].append(item)
                 elif dte < 14:
-                    w7to14.append(item)
-                    w7to14_counts[count_key] += 1
+                    buckets["w7to14"][bucket_key].append(item)
                 elif dte < 21:
-                    w14to21.append(item)
-                    w14to21_counts[count_key] += 1
+                    buckets["w14to21"][bucket_key].append(item)
                 else:
-                    gt21.append(item)
-                    gt21_counts[count_key] += 1
+                    buckets["gt21"][bucket_key].append(item)
             except (ValueError, KeyError):
                 pass
 
-        # Build summary badges for each bucket
-        def make_summary_row(counts):
-            badges = []
-            itm_count = counts.get("ITM", 0)
-            otm5_count = counts.get("5% OTM", 0)
-            otm10_count = counts.get("10% OTM", 0)
-            if itm_count > 0:
-                badges.append(
-                    html.Span(
-                        f"ITM: {itm_count}",
-                        style={
-                            "color": ACCENT_PROFIT,
-                            "fontSize": "0.75rem",
-                            "marginRight": "0.5rem",
-                        },
-                    )
-                )
-            if otm5_count > 0:
-                badges.append(
-                    html.Span(
-                        f"5% OTM: {otm5_count}",
-                        style={
-                            "color": ACCENT_WARN,
-                            "fontSize": "0.75rem",
-                            "marginRight": "0.5rem",
-                        },
-                    )
-                )
-            if otm10_count > 0:
-                badges.append(
-                    html.Span(
-                        f"10% OTM: {otm10_count}",
-                        style={
-                            "color": ACCENT_LOSS,
-                            "fontSize": "0.75rem",
-                        },
-                    )
-                )
-            if not badges:
-                return html.Div()
-            return html.Div(
-                badges,
-                style={"marginTop": "0.5rem", "display": "flex", "alignItems": "center"},
-            )
+        def build_bucket_content(bucket_data: dict) -> list:
+            """Build grouped content for a DTE bucket with moneyness sub-headers."""
+            total_count = sum(len(items) for items in bucket_data.values())
+            content = [_count_badge([None] * total_count)]
 
-        # Add summary to each bucket
-        lt7_with_summary = _with_count(lt7) + [make_summary_row(lt7_counts)]
-        w7to14_with_summary = _with_count(w7to14) + [make_summary_row(w7to14_counts)]
-        w14to21_with_summary = _with_count(w14to21) + [make_summary_row(w14to21_counts)]
-        gt21_with_summary = _with_count(gt21) + [make_summary_row(gt21_counts)]
+            # Order: ITM (highest risk) → 5% OTM → 10% OTM → N/A (unknown)
+            order = [
+                ("ITM", ACCENT_PROFIT),
+                ("5% OTM", ACCENT_WARN),
+                ("10% OTM", ACCENT_LOSS),
+                ("N/A", TEXT_SECONDARY),
+            ]
 
-        return lt7_with_summary, w7to14_with_summary, w14to21_with_summary, gt21_with_summary
+            for label, color in order:
+                items = bucket_data.get(label, [])
+                if not items:
+                    continue
+
+                # Sub-header for this moneyness group
+                sub_header = html.Div(
+                    [
+                        html.Span(
+                            label,
+                            style={
+                                "color": color,
+                                "fontSize": "0.75rem",
+                                "fontWeight": 600,
+                            },
+                        ),
+                        html.Span(
+                            f" ({len(items)})",
+                            style={"color": TEXT_SECONDARY, "fontSize": "0.7rem"},
+                        ),
+                    ],
+                    style={
+                        "marginTop": "0.5rem",
+                        "marginBottom": "0.25rem",
+                        "paddingLeft": "0.25rem",
+                        "borderBottom": f"1px solid {BORDER}",
+                    },
+                )
+                content.append(sub_header)
+                content.extend(items)
+
+            if total_count == 0:
+                content.append(html.Small("None", style={"color": TEXT_SECONDARY}))
+
+            return content
+
+        lt7_content = build_bucket_content(buckets["lt7"])
+        w7to14_content = build_bucket_content(buckets["w7to14"])
+        w14to21_content = build_bucket_content(buckets["w14to21"])
+        gt21_content = build_bucket_content(buckets["gt21"])
+
+        return lt7_content, w7to14_content, w14to21_content, gt21_content
 
     # ---- Settings callbacks ----
 
@@ -1308,6 +1306,7 @@ def register_all_callbacks(dash_app):
     @dash_app.callback(
         Output("screener-table", "data"),
         Output("screener-table", "columns"),
+        Output("screener-table", "style_data_conditional"),
         Input("screener-results-store", "data"),
         Input("main-tabs", "active_tab"),
         Input("filter-ticker", "value"),
@@ -1337,10 +1336,11 @@ def register_all_callbacks(dash_app):
     ):
         results = scan_data.get("results", [])
         if not results or active_tab != "suggestions":
-            return [], []
+            return [], [], []
 
-        # Client-side filtering by criteria (no re-scan needed)
-        filtered = []
+        # Mark each row with _passes_criteria flag (1=pass, 0=fail)
+        # Apply ticker and rating filters for display, but keep all criteria rows
+        marked = []
         for r in results:
             iv_pct = (r.get("iv") or 0) * 100
             delta_abs = r.get("delta") or 0
@@ -1349,30 +1349,26 @@ def register_all_callbacks(dash_app):
             ann_roc = r.get("ann_roc_pct") or 0
             capital = r.get("capital_required") or 0
 
-            if min_iv is not None and iv_pct < min_iv:
-                continue
-            if min_delta is not None and delta_abs < min_delta:
-                continue
-            if max_delta is not None and delta_abs > max_delta:
-                continue
-            if min_dte is not None and dte < min_dte:
-                continue
-            if max_dte is not None and dte > max_dte:
-                continue
-            if min_otm is not None and otm < min_otm:
-                continue
-            if min_roc is not None and ann_roc < min_roc:
-                continue
-            if max_capital is not None and capital > max_capital:
-                continue
-            filtered.append(r)
+            passes = (
+                (min_iv is None or iv_pct >= min_iv)
+                and (min_delta is None or delta_abs >= min_delta)
+                and (max_delta is None or delta_abs <= max_delta)
+                and (min_dte is None or dte >= min_dte)
+                and (max_dte is None or dte <= max_dte)
+                and (min_otm is None or otm >= min_otm)
+                and (min_roc is None or ann_roc >= min_roc)
+                and (max_capital is None or capital <= max_capital)
+            )
+            marked.append((r, passes))
+
+        # Apply display filters only (ticker, rating)
+        filtered = marked
+        if ticker:
+            filtered = [(r, p) for r, p in filtered if r.get("symbol") == ticker]
+        if min_rating:
+            filtered = [(r, p) for r, p in filtered if r.get("rating", 0) >= min_rating]
 
         results = filtered
-
-        if ticker:
-            results = [r for r in results if r.get("symbol") == ticker]
-        if min_rating:
-            results = [r for r in results if r.get("rating", 0) >= min_rating]
 
         cols = [
             {"name": "Ticker", "id": "symbol"},
@@ -1388,7 +1384,7 @@ def register_all_callbacks(dash_app):
         ]
 
         rows = []
-        for r in results:
+        for r, passes in results:
             stars = "\u2605" * r.get("rating", 0)
             rows.append(
                 {
@@ -1404,10 +1400,19 @@ def register_all_callbacks(dash_app):
                     "rating": r.get("rating"),
                     "rating_display": f"{stars} {r.get('rating_label', '')}",
                     "_full": r,
+                    "_passes_criteria": 1 if passes else 0,
                 }
             )
 
-        return rows, cols
+        conditional_styles = [
+            {"if": {"filter_query": "{rating} = 5"}, "borderLeft": f"3px solid {ACCENT_PROFIT}"},
+            {"if": {"filter_query": "{rating} = 4"}, "borderLeft": f"3px solid {ACCENT_INFO}"},
+            {"if": {"filter_query": "{rating} <= 3"}, "borderLeft": f"3px solid {ACCENT_WARN}"},
+            # Red background for non-qualifying options
+            {"if": {"filter_query": "{_passes_criteria} = 0"}, "backgroundColor": "rgba(255, 82, 82, 0.12)", "color": ACCENT_LOSS},
+        ]
+
+        return rows, cols, conditional_styles
 
     @dash_app.callback(
         Output("screener-detail-panel", "children"),

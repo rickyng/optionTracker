@@ -4,8 +4,6 @@ from dash import dash_table, dcc, html
 
 from app.dashboard.layouts.screener_presets import STRATEGY_PRESETS
 from app.dashboard.tokens import (
-    ACCENT_INFO,
-    ACCENT_PROFIT,
     ACCENT_WARN,
     BG_CARD,
     BG_CARD_HEADER,
@@ -235,11 +233,6 @@ def screener_layout():
                     "padding": "0.4rem 0.6rem",
                     "cursor": "pointer",
                 },
-                style_data_conditional=[
-                    {"if": {"filter_query": "{rating} = 5"}, "borderLeft": f"3px solid {ACCENT_PROFIT}"},
-                    {"if": {"filter_query": "{rating} = 4"}, "borderLeft": f"3px solid {ACCENT_INFO}"},
-                    {"if": {"filter_query": "{rating} <= 3"}, "borderLeft": f"3px solid {ACCENT_WARN}"},
-                ],
             ),
             # Detail panel
             html.Div(id="screener-detail-panel", style={"display": "none"}),
