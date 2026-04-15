@@ -201,13 +201,26 @@ def settings_layout():
                             dbc.Col(
                                 [
                                     dbc.Button(
-                                        "Sync All Data",
-                                        id="sync-all-data-btn",
+                                        "Force Sync",
+                                        id="sync-force-btn",
+                                        size="sm",
                                         style={
                                             "backgroundColor": ACCENT_PROFIT,
                                             "borderColor": ACCENT_PROFIT,
                                             "color": "#0f0f1a",
                                             "fontWeight": 600,
+                                        },
+                                    ),
+                                    dbc.Button(
+                                        "Smart Sync",
+                                        id="sync-smart-btn",
+                                        size="sm",
+                                        style={
+                                            "backgroundColor": TEXT_ACCENT,
+                                            "borderColor": TEXT_ACCENT,
+                                            "color": "#0f0f1a",
+                                            "fontWeight": 600,
+                                            "marginLeft": "0.5rem",
                                         },
                                     ),
                                     html.Span(

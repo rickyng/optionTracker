@@ -1576,14 +1576,15 @@ def register_all_callbacks(dash_app):
         Output("sync-last-time", "children"),
         Output("sync-banner-poll-interval", "disabled"),
         Output("settings-stale-check", "disabled"),
-        Input("sync-all-data-btn", "n_clicks"),
+        Input("sync-force-btn", "n_clicks"),
+        Input("sync-smart-btn", "n_clicks"),
         Input("sync-banner-poll-interval", "n_intervals"),
         Input("settings-stale-check", "n_intervals"),
         State("sync-status-store", "data"),
         prevent_initial_call=True,
     )
-    def handle_sync_pipeline(btn_clicks, poll_intervals, stale_check, store_data):
-        """Handle Sync All Data button + polling."""
+    def handle_sync_pipeline(force_clicks, smart_clicks, poll_intervals, stale_check, store_data):
+        """Handle Sync buttons + polling."""
         ctx = dash.callback_context
         triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
 
@@ -1595,8 +1596,8 @@ def register_all_callbacks(dash_app):
                     ts = last_sync["last_sync"]
                     age_hours = _get_age_hours(ts)
                     if age_hours >= 24:
-                        # Auto-trigger sync
-                        resp = _api_post("/api/sync/all", timeout=10)
+                        # Auto-trigger smart sync
+                        resp = _api_post("/api/sync/all?force=false", timeout=10)
                         if resp and resp.ok:
                             data = resp.json()
                             job_id = data.get("job_id")
@@ -1607,16 +1608,25 @@ def register_all_callbacks(dash_app):
                 return dash.no_update, dash.no_update, dash.no_update, True, True
 
         # Case 2: Button click — trigger sync
-        if triggered == "sync-all-data-btn.n_clicks" and btn_clicks:
+        if "sync-force-btn.n_clicks" == triggered and force_clicks:
+            force = True
+        elif "sync-smart-btn.n_clicks" == triggered and smart_clicks:
+            force = False
+        else:
+            force = None
+
+        if force is not None:
             try:
-                resp = _api_post("/api/sync/all?force=false", timeout=10)
+                force_str = "true" if force else "false"
+                label = "Force" if force else "Smart"
+                resp = _api_post(f"/api/sync/all?force={force_str}", timeout=10)
                 if resp is None:
                     return {}, [html.Small("Network error", style={"color": ACCENT_LOSS})], "", True, dash.no_update
                 if not resp.ok:
                     return {}, [html.Small(f"Error: {resp.status_code}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
                 data = resp.json()
                 job_id = data.get("job_id")
-                return {"job_id": job_id, "status": "pending"}, [], "", False, dash.no_update
+                return {"job_id": job_id, "status": "pending", "force": force}, [html.Small(f"{label} sync started...", style={"color": TEXT_SECONDARY})], "", False, dash.no_update
             except Exception as e:
                 return {}, [html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
 
