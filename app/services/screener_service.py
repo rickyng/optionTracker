@@ -192,9 +192,9 @@ async def _scan_ticker_with_retry(
     symbol: str,
     filters: ScanFilters,
     cached_info: dict | None = None,
-    max_retries: int = 3,
+    max_retries: int = 2,
 ) -> tuple[str, list[ScreenerResultOut], str | None]:
-    """Fetch and screen puts for a single ticker, with retry on rate-limit.
+    """Fetch and screen puts for a single ticker, with retry on rate-limit or timeout.
 
     Returns (symbol, results, error).
     """
@@ -207,12 +207,20 @@ async def _scan_ticker_with_retry(
             return symbol, result, None
         except Exception as e:
             err_msg = str(e).lower()
-            is_rate_limit = "rate" in err_msg or "429" in err_msg or "too many" in err_msg
-            if is_rate_limit:
+            # Retry on rate limit OR timeout errors
+            is_retryable = (
+                "rate" in err_msg
+                or "429" in err_msg
+                or "too many" in err_msg
+                or "timeout" in err_msg
+                or "timed out" in err_msg
+                or "curl" in err_msg  # libcurl timeout errors
+            )
+            if is_retryable:
                 _last_rate_limit_time = time.time()
                 if attempt < max_retries:
-                    backoff = settings.yfinance_delay_between_symbols * (2**attempt)  # exponential
-                    _logger.warning("Rate limited on %s, retry %d/%d in %ds", symbol, attempt + 1, max_retries, backoff)
+                    backoff = settings.yfinance_delay_between_symbols * (2**attempt)
+                    _logger.warning("Retryable error on %s (attempt %d/%d): %s", symbol, attempt + 1, max_retries, err_msg[:100])
                     await asyncio.sleep(backoff)
                     continue
             return symbol, [], str(e)
