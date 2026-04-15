@@ -114,12 +114,15 @@ def _api_get(path, params=None, timeout=5, max_retries=2):
 
 
 def _api_post(path, json=None, timeout=15, max_retries=2):
-    """POST to internal API with retry on transient errors. Returns Response or None."""
+    """POST to internal API with retry on transient errors. Returns parsed JSON or None."""
     headers = _get_user_headers()
     last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            return requests.post(f"{API_BASE}{path}", json=json, headers=headers, timeout=timeout)
+            resp = requests.post(f"{API_BASE}{path}", json=json, headers=headers, timeout=timeout)
+            if not resp.ok:
+                return None
+            return resp.json()
         except (requests.Timeout, requests.ConnectionError) as e:
             last_exc = e
             if attempt < max_retries:
