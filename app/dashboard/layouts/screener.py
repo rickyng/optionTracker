@@ -1,5 +1,6 @@
 """Suggestions tab layout — CSP Screener UI."""
 
+import dash_bootstrap_components as dbc
 from dash import dash_table, dcc, html
 
 from app.dashboard.layouts.screener_presets import STRATEGY_PRESETS
@@ -16,7 +17,7 @@ from app.dashboard.tokens import (
 def screener_layout():
     return html.Div(
         [
-            # Header
+            # Header with scan button
             html.Div(
                 [
                     html.Span(
@@ -34,6 +35,19 @@ def screener_layout():
                             "color": TEXT_SECONDARY,
                             "marginLeft": "0.75rem",
                         },
+                    ),
+                    dbc.Button(
+                        "Run Scan",
+                        id="screener-scan-btn",
+                        color="primary",
+                        size="sm",
+                        className="ms-auto",
+                        style={"fontSize": "0.75rem"},
+                    ),
+                    dcc.Loading(
+                        html.Span(id="screener-scan-status"),
+                        type="circle",
+                        color=TEXT_SECONDARY,
                     ),
                 ],
                 style={"display": "flex", "alignItems": "center", "marginBottom": "1rem"},

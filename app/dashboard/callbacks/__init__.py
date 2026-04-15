@@ -1932,38 +1932,77 @@ def register_all_callbacks(dash_app):
         except Exception as e:
             return html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})
 
-    # ---- Screener Cache Reader ----
+    # ---- Screener Cache Reader & Manual Scan Trigger ----
     @dash_app.callback(
         Output("screener-results-store", "data"),
         Output("screener-data-age", "children"),
         Output("screener-summary-cards", "children"),
+        Output("screener-scan-status", "children"),
         Input("main-tabs", "active_tab"),
+        Input("screener-scan-btn", "n_clicks"),
         prevent_initial_call=True,
     )
-    def load_screener_cache(active_tab):
-        """Load screener results from DB cache (no on-demand scan)."""
+    def load_screener_cache(active_tab, scan_clicks):
+        """Load screener results from DB cache or trigger a new scan."""
         if active_tab != "suggestions":
-            return dash.no_update, dash.no_update, dash.no_update
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
+        ctx = dash.callback_context
+        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+        is_scan_triggered = triggered == "screener-scan-btn.n_clicks" and scan_clicks
+
+        # If scan button clicked, start the scan
+        if is_scan_triggered:
+            try:
+                resp = _api_post("/api/screener/scan", timeout=10)
+                job_id = resp.get("job_id")
+                if not job_id:
+                    return dash.no_update, dash.no_update, dash.no_update, "Failed to start scan"
+            except Exception as e:
+                return dash.no_update, dash.no_update, dash.no_update, f"Error: {e}"
+
+            # Poll for completion (max 60 iterations = 5 minutes)
+            import time
+            for _ in range(60):
+                time.sleep(5)
+                try:
+                    status = _api_get(f"/api/screener/scan/{job_id}", timeout=10)
+                    if status.get("status") == "completed":
+                        break
+                    if status.get("status") == "failed":
+                        return dash.no_update, dash.no_update, dash.no_update, "Scan failed"
+                except Exception:
+                    pass
+
+            # Scan complete - fall through to reload results
+
+        # Load results from cache
         try:
             data = _api_get("/api/screener/results", timeout=10)
             if not data:
-                return {}, "No cached data", html.Small("Sync in Settings tab", style={"color": TEXT_SECONDARY})
+                return (
+                    {},
+                    "No cached data",
+                    html.Small(
+                        ["Click ", html.Strong("Run Scan"), " to start a fresh scan"],
+                        style={"color": TEXT_SECONDARY},
+                    ),
+                    "",
+                )
 
             results = data.get("results", [])
             if not results:
-                return {}, "No data", html.Small("No opportunities found", style={"color": TEXT_SECONDARY})
+                return {}, "No data", html.Small("No opportunities found", style={"color": TEXT_SECONDARY}), ""
 
             # Build summary cards
             total_capital = sum(r.get("capital_required", 0) for r in results)
             avg_iv = sum(r.get("iv", 0) for r in results) / len(results) if results else 0
-
-            # Get scanned_at from most recent result
             scanned_at = results[0].get("scanned_at", "") if results else ""
+            watchlist_count = len(set(r.get("symbol") for r in results))
 
             scan_data = {
                 "results": results,
-                "watchlist_count": len(set(r.get("symbol") for r in results)),
+                "watchlist_count": watchlist_count,
                 "opportunities_found": len(results),
                 "avg_iv": avg_iv,
                 "total_capital": total_capital,
@@ -1972,12 +2011,11 @@ def register_all_callbacks(dash_app):
 
             age_str = ""
             if scanned_at:
-                age = _format_age(scanned_at)
-                age_str = f"({age})"
+                age_str = f"({_format_age(scanned_at)})"
 
             summary = dbc.Row(
                 [
-                    dbc.Col(kpi_card("Watchlist", str(scan_data["watchlist_count"]), ACCENT_INFO), lg=2, sm=6),
+                    dbc.Col(kpi_card("Watchlist", str(watchlist_count), ACCENT_INFO), lg=2, sm=6),
                     dbc.Col(kpi_card("Opportunities", str(len(results)), ACCENT_PROFIT), lg=2, sm=6),
                     dbc.Col(kpi_card("Avg IV", f"{avg_iv * 100:.1f}%", ACCENT_WARN), lg=2, sm=6),
                     dbc.Col(kpi_card("Total Capital", fmt_money(total_capital), ACCENT_PROFIT), lg=2, sm=6),
@@ -1989,10 +2027,10 @@ def register_all_callbacks(dash_app):
                 ]
             )
 
-            return scan_data, age_str, summary
+            return scan_data, age_str, summary, ""
 
         except Exception as e:
-            return {}, f"Error: {e}", html.Small(str(e), style={"color": ACCENT_LOSS})
+            return {}, f"Error: {e}", html.Small(str(e), style={"color": ACCENT_LOSS}), ""
 
 
 def _format_age(ts_str: str) -> str:
