@@ -103,6 +103,8 @@ def _api_get(path, params=None, timeout=5, max_retries=2):
     for attempt in range(max_retries + 1):
         try:
             resp = requests.get(f"{API_BASE}{path}", params=params, headers=headers, timeout=timeout)
+            if not resp.ok:
+                return None
             return resp.json()
         except (requests.Timeout, requests.ConnectionError) as e:
             last_exc = e
@@ -1626,7 +1628,16 @@ def register_all_callbacks(dash_app):
         try:
             status_data = _api_get(f"/api/sync/status/{job_id}", timeout=10)
             if not status_data:
-                # Poll failed — retry
+                # Job not found (404) — likely cleaned up after completion. Check last-sync.
+                try:
+                    last_sync = _api_get("/api/sync/last-sync")
+                    if last_sync and last_sync.get("last_sync"):
+                        ts = last_sync["last_sync"]
+                        last_time = f"Last: {ts[:19]}"
+                        return {"status": "completed", "last_sync": ts}, [], last_time, True, dash.no_update
+                except Exception:
+                    pass
+                # Retry on transient failure
                 return store_data, dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
             status = status_data.get("status")
@@ -1760,10 +1771,18 @@ def register_all_callbacks(dash_app):
         Output("account-sync-status", "children"),
         Input("main-tabs", "active_tab"),
         Input("accounts-store", "data"),
+        Input("sync-status-store", "data"),
     )
-    def update_account_sync_status(active_tab, accounts):
+    def update_account_sync_status(active_tab, accounts, sync_data):
         """Fetch and display account sync status in Settings tab."""
+        # Refresh on settings tab or when sync completes
         if active_tab != "settings":
+            return dash.no_update
+
+        # Only trigger on sync completion (skip intermediate states)
+        ctx = dash.callback_context
+        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+        if triggered == "sync-status-store.data" and sync_data and sync_data.get("status") not in ("completed", "error"):
             return dash.no_update
 
         try:
@@ -1817,10 +1836,17 @@ def register_all_callbacks(dash_app):
     @dash_app.callback(
         Output("price-sync-status", "children"),
         Input("main-tabs", "active_tab"),
+        Input("sync-status-store", "data"),
     )
-    def update_price_sync_status(active_tab):
+    def update_price_sync_status(active_tab, sync_data):
         """Fetch and display price sync status in Settings tab."""
         if active_tab != "settings":
+            return dash.no_update
+
+        # Only trigger on sync completion (skip intermediate states)
+        ctx = dash.callback_context
+        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+        if triggered == "sync-status-store.data" and sync_data and sync_data.get("status") not in ("completed", "error"):
             return dash.no_update
 
         try:
