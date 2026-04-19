@@ -32,7 +32,7 @@ async def sync_all(
         user_account_ids=user_account_ids,
         user_sub=user_sub,
     )
-    return {"job_id": job_id, "status": "pending", "total_steps": 4}
+    return {"job_id": job_id, "status": "pending", "total_steps": 3}
 
 
 @router.get("/status/{job_id}")

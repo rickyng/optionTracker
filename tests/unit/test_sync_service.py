@@ -1,15 +1,16 @@
 import uuid
-import pytest
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.services.sync_service import (
-    get_sync_job_status,
-    trigger_sync_all,
+    _CACHE_TTL_HOURS,
     _SYNC_STEPS,
     _is_step_stale,
-    _CACHE_TTL_HOURS,
     _run_sync_pipeline,
+    get_sync_job_status,
+    trigger_sync_all,
 )
 
 
@@ -23,9 +24,9 @@ async def db_session():
         yield session
         # Cleanup: delete all test metadata keys after test
         await session.execute(
-            __import__('sqlalchemy').delete(Metadata).where(
-                __import__('sqlalchemy').cast(Metadata.key, __import__('sqlalchemy').String).like("test_%")
-            )
+            __import__("sqlalchemy")
+            .delete(Metadata)
+            .where(__import__("sqlalchemy").cast(Metadata.key, __import__("sqlalchemy").String).like("test_%"))
         )
         await session.commit()
 
@@ -42,17 +43,16 @@ async def test_trigger_sync_all_creates_job():
     assert job["status"] == "pending"
     assert job["current_step"] == 0
     assert job["step_name"] == ""
-    assert job["total_steps"] == 4
+    assert job["total_steps"] == 3
 
 
 @pytest.mark.asyncio
 async def test_sync_step_names():
-    """Sync pipeline has 4 named steps."""
-    assert len(_SYNC_STEPS) == 4
+    """Sync pipeline has 3 named steps."""
+    assert len(_SYNC_STEPS) == 3
     assert _SYNC_STEPS[1] == "IBKR Flex"
     assert _SYNC_STEPS[2] == "Stock Prices"
     assert _SYNC_STEPS[3] == "Earnings Dates"
-    assert _SYNC_STEPS[4] == "Screener Options"
 
 
 @pytest.mark.asyncio
@@ -93,7 +93,7 @@ async def test_is_step_stale_with_old_metadata(db_session):
 
 @pytest.mark.asyncio
 async def test_sync_pipeline_runs_steps_in_order():
-    """Pipeline executes steps 1→2→3→4."""
+    """Pipeline executes steps 1→2→3."""
     from app.services.sync_service import _sync_jobs
 
     job_id = "test-job"
@@ -103,7 +103,7 @@ async def test_sync_pipeline_runs_steps_in_order():
         "status": "pending",
         "current_step": 0,
         "step_name": "",
-        "total_steps": 4,
+        "total_steps": 3,
         "retry_count": 0,
         "error": None,
         "force": True,
@@ -113,24 +113,22 @@ async def test_sync_pipeline_runs_steps_in_order():
     }
 
     # Mock each step
-    with patch("app.services.sync_service._step_ibkr", new_callable=AsyncMock) as mock_ibkr, \
-         patch("app.services.sync_service._step_prices", new_callable=AsyncMock) as mock_prices, \
-         patch("app.services.sync_service._step_earnings", new_callable=AsyncMock) as mock_earnings, \
-         patch("app.services.sync_service._step_screener", new_callable=AsyncMock) as mock_screener:
-
+    with (
+        patch("app.services.sync_service._step_ibkr", new_callable=AsyncMock) as mock_ibkr,
+        patch("app.services.sync_service._step_prices", new_callable=AsyncMock) as mock_prices,
+        patch("app.services.sync_service._step_earnings", new_callable=AsyncMock) as mock_earnings,
+    ):
         mock_ibkr.return_value = True
         mock_prices.return_value = True
         mock_earnings.return_value = True
-        mock_screener.return_value = True
 
         await _run_sync_pipeline(job_id, force=True, user_account_ids=None, user_sub="test")
 
-        # Verify order: IBKR called first, screener called last
+        # Verify all steps called
         assert mock_ibkr.called
         assert mock_prices.called
         assert mock_earnings.called
-        assert mock_screener.called
 
         job = _sync_jobs[job_id]
         assert job["status"] == "completed"
-        assert len(job["completed_steps"]) == 4
+        assert len(job["completed_steps"]) == 3

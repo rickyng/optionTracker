@@ -43,13 +43,14 @@ async def fetch_price(symbol: str) -> float | None:
 
 _BATCH_DEADLINE = 12.0  # seconds for first pass — well under dashboard API timeout
 _RETRY_DEADLINE = 8.0  # seconds for second pass (timed-out symbols only)
+_BATCH_SEMAPHORE = asyncio.Semaphore(3)  # max concurrent Yahoo Finance requests
+_BATCH_DELAY = 0.5  # seconds between batched requests
 
 
 async def fetch_prices_batch(symbols: list[str]) -> dict[str, float | None]:
     """Fetch prices for multiple symbols with an overall deadline.
 
-    First pass: gather all symbols with a deadline.
-    Second pass: retry symbols that returned None.
+    Throttled to avoid Yahoo Finance rate limiting.
     Returns whatever prices resolved; unresolved symbols get None.
     """
     if not symbols:
@@ -57,34 +58,48 @@ async def fetch_prices_batch(symbols: list[str]) -> dict[str, float | None]:
 
     results: dict[str, float | None] = {}
 
+    async def _throttled_fetch(sym: str) -> tuple[str, float | None]:
+        async with _BATCH_SEMAPHORE:
+            price = await fetch_price(sym)
+        return sym, price
+
     # --- First pass ---
-    tasks = {asyncio.create_task(fetch_price(sym)): sym for sym in symbols}
-    done, pending = await asyncio.wait(tasks.keys(), timeout=_BATCH_DEADLINE)
+    tasks = [asyncio.create_task(_throttled_fetch(sym)) for sym in symbols]
+    done, pending = await asyncio.wait(tasks, timeout=_BATCH_DEADLINE)
 
     for task in done:
-        sym = tasks[task]
         try:
-            results[sym] = task.result()
+            sym, price = task.result()
+            results[sym] = price
         except Exception:
-            results[sym] = None
+            pass
 
     for task in pending:
         task.cancel()
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
         for task in pending:
-            results[tasks[task]] = None
+            try:
+                sym, _ = task.result()
+                results[sym] = None
+            except (Exception, asyncio.CancelledError):
+                pass
+
+    # Mark symbols with no result as None
+    for sym in symbols:
+        if sym not in results:
+            results[sym] = None
 
     # --- Second pass: retry symbols that returned None ---
     retry_symbols = [sym for sym in symbols if results.get(sym) is None]
     if retry_symbols:
-        retry_tasks = {asyncio.create_task(fetch_price(sym)): sym for sym in retry_symbols}
-        retry_done, retry_pending = await asyncio.wait(retry_tasks.keys(), timeout=_RETRY_DEADLINE)
+        await asyncio.sleep(_BATCH_DELAY)
+        retry_tasks = [asyncio.create_task(_throttled_fetch(sym)) for sym in retry_symbols]
+        retry_done, retry_pending = await asyncio.wait(retry_tasks, timeout=_RETRY_DEADLINE)
 
         for task in retry_done:
-            sym = retry_tasks[task]
             try:
-                price = task.result()
+                sym, price = task.result()
                 if price is not None:
                     results[sym] = price
             except Exception:

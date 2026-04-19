@@ -1,4 +1,4 @@
-"""Centralized sync orchestration — 4-step pipeline with cache TTL."""
+"""Centralized sync orchestration — 3-step pipeline with cache TTL."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import async_session
 from app.models.metadata import Metadata
 
@@ -26,7 +27,6 @@ _SYNC_STEPS = {
     1: "IBKR Flex",
     2: "Stock Prices",
     3: "Earnings Dates",
-    4: "Screener Options",
 }
 
 # Cache TTL in hours
@@ -44,7 +44,7 @@ async def trigger_sync_all(
         "status": "pending",
         "current_step": 0,
         "step_name": "",
-        "total_steps": 4,
+        "total_steps": 3,
         "retry_count": 0,
         "error": None,
         "last_sync": None,
@@ -54,9 +54,7 @@ async def trigger_sync_all(
         "completed_steps": [],
     }
 
-    task = asyncio.create_task(
-        _run_sync_pipeline(job_id, force, user_account_ids, user_sub)
-    )
+    task = asyncio.create_task(_run_sync_pipeline(job_id, force, user_account_ids, user_sub))
     _running_tasks.add(task)
     task.add_done_callback(_running_tasks.discard)
 
@@ -128,7 +126,7 @@ async def _run_sync_pipeline(
     user_account_ids: list[int] | None,
     user_sub: str,
 ) -> None:
-    """Execute the 4-step sync pipeline with retry logic."""
+    """Execute the 3-step sync pipeline with retry logic."""
     try:
         _update_job(job_id, status="running")
 
@@ -136,7 +134,6 @@ async def _run_sync_pipeline(
             (1, "IBKR Flex", "sync_ibkr_flex_last_run", _step_ibkr),
             (2, "Stock Prices", "sync_stock_prices_last_run", _step_prices),
             (3, "Earnings Dates", "sync_earnings_dates_last_run", _step_earnings),
-            (4, "Screener Options", "sync_screener_options_last_run", _step_screener),
         ]
 
         for step_num, step_name, cache_key, step_fn in steps:
@@ -165,6 +162,10 @@ async def _run_sync_pipeline(
                 await _mark_step_complete(db, cache_key)
 
             _update_job(job_id, completed_steps=_sync_jobs[job_id]["completed_steps"] + [step_num])
+
+            # Pause between yfinance-heavy steps (prices → earnings)
+            if step_num == 2:
+                await asyncio.sleep(settings.yfinance_delay_between_symbols)
 
         # All steps completed
         _update_job(job_id, status="completed", last_sync=datetime.now(UTC).isoformat())
@@ -226,7 +227,7 @@ async def _run_step_with_retry(
 async def _step_ibkr(job_id: str, user_account_ids: list[int] | None, user_sub: str) -> bool:
     """Step 1: Download positions from IBKR Flex for all enabled accounts."""
     from app.services import account_service
-    from app.services.flex_service import trigger_flex_download, get_job_status
+    from app.services.flex_service import get_job_status, trigger_flex_download
 
     async with async_session() as db:
         accounts = await account_service.get_enabled_accounts(db, user_account_ids=user_account_ids)
@@ -248,7 +249,7 @@ async def _step_ibkr(job_id: str, user_account_ids: list[int] | None, user_sub: 
 
     # Poll each flex job until complete
     max_polls = 30
-    for poll in range(max_polls):
+    for _poll in range(max_polls):
         all_done = True
         for account_name, flex_job_id in flex_job_ids:
             status = get_job_status(flex_job_id)
@@ -284,30 +285,3 @@ async def _step_earnings(job_id: str, user_account_ids: list[int] | None, user_s
         results = await refresh_all_earnings_dates(db, user_account_ids=user_account_ids)
         logger.info("Earnings refresh complete: %d symbols", len(results))
         return True
-
-
-async def _step_screener(job_id: str, user_account_ids: list[int] | None, user_sub: str) -> bool:
-    """Step 4: Fetch options chains for screener watchlist."""
-    from app.services.screener_service import trigger_scan_job, get_scan_job_status, get_watchlist
-    from app.schemas.screener import ScanFilters
-
-    async with async_session() as db:
-        symbols = await get_watchlist(db, user_sub)
-
-        if not symbols:
-            logger.info("No watchlist symbols to scan")
-            return True
-
-        filters = ScanFilters()
-        scan_job_id = await trigger_scan_job(db, user_sub, filters, symbols)
-
-    # Poll scan job until complete
-    max_polls = 60
-    for poll in range(max_polls):
-        status = get_scan_job_status(scan_job_id)
-        if status and status["status"] in ("completed", "failed"):
-            break
-        await asyncio.sleep(5)
-
-    logger.info("Screener scan complete for user %s", user_sub)
-    return True

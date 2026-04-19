@@ -4,7 +4,6 @@ from dash import dcc, html
 from app.dashboard.components import card
 from app.dashboard.tokens import (
     ACCENT_PROFIT,
-    ACCENT_WARN,
     BG_INPUT,
     BORDER,
     TEXT_ACCENT,
@@ -238,46 +237,6 @@ def settings_layout():
                     ),
                     html.Div(id="sync-progress-list", className="mt-3"),
                     dcc.Interval(id="settings-stale-check", interval=100, max_intervals=1, disabled=False),
-                ],
-            ),
-            # ── Screener Watchlist ────────────────────────────────────────
-            html.Div(style={"height": "1.5rem"}),
-            card(
-                "Screener Watchlist",
-                [
-                    html.Div(id="settings-watchlist-tags", className="mb-2"),
-                    html.Div(
-                        [
-                            dcc.Input(
-                                id="settings-add-symbol-input",
-                                type="text",
-                                placeholder="e.g. AAPL",
-                                maxLength=10,
-                                style=_input_style(),
-                            ),
-                            html.Button(
-                                "Add",
-                                id="settings-add-symbol-btn",
-                                n_clicks=0,
-                                style={
-                                    "backgroundColor": TEXT_ACCENT,
-                                    "color": "#0f0f1a",
-                                    "border": "none",
-                                    "borderRadius": "4px",
-                                    "padding": "0.3rem 0.8rem",
-                                    "fontWeight": 600,
-                                    "fontSize": "0.8rem",
-                                    "cursor": "pointer",
-                                    "marginLeft": "0.5rem",
-                                },
-                            ),
-                            html.Span(
-                                id="settings-add-symbol-status",
-                                style={"fontSize": "0.75rem", "color": ACCENT_WARN, "marginLeft": "0.5rem"},
-                            ),
-                        ],
-                        className="d-flex align-items-center",
-                    ),
                 ],
             ),
             # ── Account Sync Status ────────────────────────────────────────

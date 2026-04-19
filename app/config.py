@@ -58,9 +58,6 @@ class Settings(BaseSettings):
 
     # yfinance Rate Limiting
     yfinance_delay_between_symbols: float = 2.0  # seconds between ticker.info calls
-    yfinance_delay_between_chains: float = 1.5  # seconds between option_chain calls
-    yfinance_ticker_delay: float = 5.0  # seconds between ticker scans
-    yfinance_rate_limit_cooldown: float = 30.0  # seconds to pause after any 429
 
     # Dashboard Callbacks
     dashboard_api_timeout_short: int = 5  # CRUD operations

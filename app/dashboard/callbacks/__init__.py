@@ -17,15 +17,12 @@ from app.dashboard.layouts.expiration import expiration_layout
 from app.dashboard.layouts.main import make_summary_cards, overview_layout
 from app.dashboard.layouts.positions import positions_layout
 from app.dashboard.layouts.risk import risk_layout
-from app.dashboard.layouts.screener import screener_layout
 from app.dashboard.layouts.settings import settings_layout
 from app.dashboard.tokens import (
-    ACCENT_INFO,
     ACCENT_LOSS,
     ACCENT_PROFIT,
     ACCENT_WARN,
     BG_CARD,
-    BG_CARD_HEADER,
     BG_ROW_ALT,
     BORDER,
     PLOT_LAYOUT,
@@ -196,7 +193,6 @@ def register_all_callbacks(dash_app):
             "positions": positions_layout,
             "risk": risk_layout,
             "expiration": expiration_layout,
-            "suggestions": screener_layout,
             "settings": settings_layout,
         }
         layout_fn = layouts.get(active_tab, overview_layout)
@@ -1125,9 +1121,9 @@ def register_all_callbacks(dash_app):
                 json={"name": name, "token": token, "query_id": query_id},
                 timeout=10,
             )
-            result, err = _safe_json_resp(resp)
-            if err:
-                return html.Small(f"Error: {err}", style={"color": ACCENT_LOSS})
+            if not resp:
+                return html.Small("Network error", style={"color": ACCENT_LOSS})
+            result = resp
             return html.Small(
                 f"Created: {result.get('name', '')} (ID: {result.get('id', '')})", style={"color": ACCENT_PROFIT}
             )
@@ -1196,298 +1192,6 @@ def register_all_callbacks(dash_app):
 
     # ---- Screener callbacks ----
 
-    # ---- Strategy preset callback ----
-    @dash_app.callback(
-        Output("filter-min-iv", "value"),
-        Output("filter-min-delta", "value"),
-        Output("filter-max-delta", "value"),
-        Output("filter-min-dte", "value"),
-        Output("filter-max-dte", "value"),
-        Output("filter-min-otm", "value"),
-        Output("filter-min-roc", "value"),
-        Output("filter-max-capital", "value"),
-        Output("strategy-preset-note", "children"),
-        Output("strategy-preset-tickers", "children"),
-        Output("filter-ticker", "value"),
-        Input("strategy-preset-select", "value"),
-        prevent_initial_call=True,
-    )
-    def apply_strategy_preset(preset_key):
-        from app.dashboard.layouts.screener_presets import STRATEGY_PRESETS
-
-        if not preset_key:
-            no_update = dash.no_update
-            return (no_update,) * 8 + ([], [], no_update)
-
-        preset = STRATEGY_PRESETS.get(preset_key)
-        if not preset:
-            no_update = dash.no_update
-            return (no_update,) * 8 + ([], [], no_update)
-
-        f = preset["filters"]
-        note = html.Small(
-            preset["note"],
-            style={"color": TEXT_SECONDARY, "fontStyle": "italic", "fontSize": "0.8rem"},
-        )
-        color = preset["color"]
-        tags = [
-            html.Span(
-                ticker,
-                style={
-                    "backgroundColor": BG_CARD_HEADER,
-                    "border": f"1px solid {color}",
-                    "borderRadius": "4px",
-                    "padding": "0.2rem 0.5rem",
-                    "fontSize": "0.8rem",
-                    "color": color,
-                    "marginRight": "0.4rem",
-                    "display": "inline-block",
-                },
-            )
-            for ticker in preset["tickers"]
-        ]
-
-        return (
-            f["min_iv"],
-            f["min_delta"],
-            f["max_delta"],
-            f["min_dte"],
-            f["max_dte"],
-            f["min_otm"],
-            f["min_roc"],
-            f["max_capital"],
-            note,
-            tags,
-            None,
-        )
-
-    @dash_app.callback(
-        Output("filter-min-iv", "value"),
-        Output("filter-min-delta", "value"),
-        Output("filter-max-delta", "value"),
-        Output("filter-min-dte", "value"),
-        Output("filter-max-dte", "value"),
-        Output("filter-min-otm", "value"),
-        Output("filter-min-roc", "value"),
-        Output("filter-max-capital", "value"),
-        Input("main-tabs", "active_tab"),
-        State("screener-filters-store", "data"),
-        prevent_initial_call=True,
-    )
-    def restore_filters(active_tab, saved):
-        if active_tab != "suggestions" or not saved:
-            return (
-                dash.no_update,
-                dash.no_update,
-                dash.no_update,
-                dash.no_update,
-                dash.no_update,
-                dash.no_update,
-                dash.no_update,
-                dash.no_update,
-            )
-        return (
-            saved.get("min_iv", 30),
-            saved.get("min_delta", 0.15),
-            saved.get("max_delta", 0.35),
-            saved.get("min_dte", 21),
-            saved.get("max_dte", 45),
-            saved.get("min_otm", 5),
-            saved.get("min_roc", 12),
-            saved.get("max_capital", 50000),
-        )
-
-    @dash_app.callback(
-        Output("filter-ticker", "options"),
-        Input("screener-results-store", "data"),
-    )
-    def update_ticker_options(scan_data):
-        results = scan_data.get("results", [])
-        symbols = sorted({r.get("symbol") for r in results if r.get("symbol")})
-        return [{"label": s, "value": s} for s in symbols]
-
-    @dash_app.callback(
-        Output("screener-table", "data"),
-        Output("screener-table", "columns"),
-        Output("screener-table", "style_data_conditional"),
-        Input("screener-results-store", "data"),
-        Input("main-tabs", "active_tab"),
-        Input("filter-ticker", "value"),
-        Input("filter-rating", "value"),
-        Input("filter-min-iv", "value"),
-        Input("filter-min-delta", "value"),
-        Input("filter-max-delta", "value"),
-        Input("filter-min-dte", "value"),
-        Input("filter-max-dte", "value"),
-        Input("filter-min-otm", "value"),
-        Input("filter-min-roc", "value"),
-        Input("filter-max-capital", "value"),
-    )
-    def update_screener_table(
-        scan_data,
-        active_tab,
-        ticker,
-        min_rating,
-        min_iv,
-        min_delta,
-        max_delta,
-        min_dte,
-        max_dte,
-        min_otm,
-        min_roc,
-        max_capital,
-    ):
-        results = scan_data.get("results", [])
-        if not results or active_tab != "suggestions":
-            return [], [], []
-
-        # Mark each row with _passes_criteria flag (1=pass, 0=fail)
-        # Apply ticker and rating filters for display, but keep all criteria rows
-        marked = []
-        for r in results:
-            iv_pct = (r.get("iv") or 0) * 100
-            delta_abs = r.get("delta") or 0
-            dte = r.get("dte") or 0
-            otm = r.get("otm_pct") or 0
-            ann_roc = r.get("ann_roc_pct") or 0
-            capital = r.get("capital_required") or 0
-
-            passes = (
-                (min_iv is None or iv_pct >= min_iv)
-                and (min_delta is None or delta_abs >= min_delta)
-                and (max_delta is None or delta_abs <= max_delta)
-                and (min_dte is None or dte >= min_dte)
-                and (max_dte is None or dte <= max_dte)
-                and (min_otm is None or otm >= min_otm)
-                and (min_roc is None or ann_roc >= min_roc)
-                and (max_capital is None or capital <= max_capital)
-            )
-            marked.append((r, passes))
-
-        # Apply display filters only (ticker, rating)
-        filtered = marked
-        if ticker:
-            filtered = [(r, p) for r, p in filtered if r.get("symbol") == ticker]
-        if min_rating:
-            filtered = [(r, p) for r, p in filtered if r.get("rating", 0) >= min_rating]
-
-        results = filtered
-
-        cols = [
-            {"name": "Ticker", "id": "symbol"},
-            {"name": "Price", "id": "price", "type": "numeric", "format": {"specifier": ".2f"}},
-            {"name": "Strike", "id": "strike", "type": "numeric", "format": {"specifier": ".2f"}},
-            {"name": "Expiry", "id": "expiry"},
-            {"name": "DTE", "id": "dte", "type": "numeric"},
-            {"name": "Bid", "id": "bid", "type": "numeric", "format": {"specifier": ".2f"}},
-            {"name": "Ann.ROC%", "id": "ann_roc_pct", "type": "numeric", "format": {"specifier": ".1f"}},
-            {"name": "IV", "id": "iv_display"},
-            {"name": "Delta", "id": "delta", "type": "numeric", "format": {"specifier": ".2f"}},
-            {"name": "Rating", "id": "rating_display"},
-        ]
-
-        rows = []
-        for r, passes in results:
-            stars = "\u2605" * r.get("rating", 0)
-            rows.append(
-                {
-                    "symbol": r.get("symbol"),
-                    "price": r.get("price"),
-                    "strike": r.get("strike"),
-                    "expiry": r.get("expiry"),
-                    "dte": r.get("dte"),
-                    "bid": r.get("bid"),
-                    "ann_roc_pct": r.get("ann_roc_pct"),
-                    "iv_display": f"{r.get('iv', 0) * 100:.1f}%",
-                    "delta": r.get("delta"),
-                    "rating": r.get("rating"),
-                    "rating_display": f"{stars} {r.get('rating_label', '')}",
-                    "_full": r,
-                    "_passes_criteria": 1 if passes else 0,
-                }
-            )
-
-        conditional_styles = [
-            {"if": {"filter_query": "{rating} = 5"}, "borderLeft": f"3px solid {ACCENT_PROFIT}"},
-            {"if": {"filter_query": "{rating} = 4"}, "borderLeft": f"3px solid {ACCENT_INFO}"},
-            {"if": {"filter_query": "{rating} <= 3"}, "borderLeft": f"3px solid {ACCENT_WARN}"},
-            # Red background for non-qualifying options
-            {"if": {"filter_query": "{_passes_criteria} = 0"}, "backgroundColor": "rgba(255, 82, 82, 0.12)", "color": ACCENT_LOSS},
-        ]
-
-        return rows, cols, conditional_styles
-
-    @dash_app.callback(
-        Output("screener-detail-panel", "children"),
-        Output("screener-detail-panel", "style"),
-        Input("screener-table", "active_cell"),
-        State("screener-table", "data"),
-    )
-    def show_detail(active_cell, table_data):
-        if not active_cell or not table_data:
-            return html.Div(), {"display": "none"}
-
-        row_idx = active_cell.get("row")
-        if row_idx is None or row_idx >= len(table_data):
-            return html.Div(), {"display": "none"}
-
-        r = table_data[row_idx].get("_full", {})
-
-        detail_style = {
-            "backgroundColor": BG_CARD,
-            "border": f"1px solid {BORDER}",
-            "borderRadius": "8px",
-            "padding": "1rem",
-            "marginTop": "0.5rem",
-        }
-
-        def _metric(label, value):
-            return html.Div(
-                [
-                    html.Div(
-                        label, style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase"}
-                    ),
-                    html.Div(str(value), style={"color": TEXT_PRIMARY, "fontSize": "0.9rem", "fontWeight": 600}),
-                ],
-                style={"marginRight": "1.5rem"},
-            )
-
-        fund_badge = ""
-        if r.get("strong_fundamentals"):
-            fund_badge = html.Span(
-                " \u2605 Strong Fundamentals",
-                style={"color": ACCENT_PROFIT, "fontSize": "0.8rem", "marginLeft": "0.5rem"},
-            )
-
-        return html.Div(
-            [
-                html.Div(
-                    [
-                        html.Strong(
-                            f"{r.get('symbol')} ${r.get('strike')}P", style={"color": TEXT_PRIMARY, "fontSize": "1rem"}
-                        ),
-                        html.Span(f" exp {r.get('expiry')}", style={"color": TEXT_SECONDARY}),
-                        fund_badge,
-                    ],
-                    style={"marginBottom": "0.75rem"},
-                ),
-                html.Div(
-                    [
-                        _metric("Mid", f"${r.get('mid', 0):.2f}"),
-                        _metric("OTM%", f"{r.get('otm_pct', 0):.1f}%"),
-                        _metric("Capital", fmt_money(r.get("capital_required", 0))),
-                        _metric("P/E", f"{r.get('pe_ratio', 'N/A')}" if r.get("pe_ratio") else "N/A"),
-                        _metric("Beta", f"{r.get('beta', 'N/A')}" if r.get("beta") else "N/A"),
-                        _metric("Margin", f"{r.get('profit_margin', 0):.1f}%" if r.get("profit_margin") else "N/A"),
-                        _metric(
-                            "Rev Growth", f"{r.get('revenue_growth', 0):.1f}%" if r.get("revenue_growth") else "N/A"
-                        ),
-                    ],
-                    className="d-flex flex-wrap",
-                ),
-            ]
-        ), detail_style
-
     # ---- Global Sync Banner ----
     @dash_app.callback(
         Output("sync-status-banner", "children"),
@@ -1537,7 +1241,10 @@ def register_all_callbacks(dash_app):
             return html.Div(
                 [
                     dbc.Spinner(size="sm", color="primary"),
-                    html.Span(f" Syncing {step_name} ({current_step}/4)...", style={"color": TEXT_PRIMARY, "fontSize": "0.85rem"}),
+                    html.Span(
+                        f" Syncing {step_name} ({current_step}/3)...",
+                        style={"color": TEXT_PRIMARY, "fontSize": "0.85rem"},
+                    ),
                 ],
                 style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
             )
@@ -1547,7 +1254,10 @@ def register_all_callbacks(dash_app):
             return html.Div(
                 [
                     dbc.Spinner(size="sm", color="warning"),
-                    html.Span(f" Retrying {step_name} ({retry_count}/3)...", style={"color": ACCENT_WARN, "fontSize": "0.85rem"}),
+                    html.Span(
+                        f" Retrying {step_name} ({retry_count}/3)...",
+                        style={"color": ACCENT_WARN, "fontSize": "0.85rem"},
+                    ),
                 ],
                 style={"padding": "0.25rem 0.5rem", "backgroundColor": BG_CARD, "borderRadius": "4px"},
             )
@@ -1606,8 +1316,8 @@ def register_all_callbacks(dash_app):
                     if age_hours >= 24:
                         # Auto-trigger smart sync
                         resp = _api_post("/api/sync/all?force=false", timeout=10)
-                        if resp and resp.ok:
-                            data = resp.json()
+                        if resp:
+                            data = resp
                             job_id = data.get("job_id")
                             return {"job_id": job_id, "status": "pending"}, [], f"Last: {ts[:19]} (stale)", False, True
                 # Data fresh or no last_sync
@@ -1616,9 +1326,9 @@ def register_all_callbacks(dash_app):
                 return dash.no_update, dash.no_update, dash.no_update, True, True
 
         # Case 2: Button click — trigger sync
-        if "sync-force-btn.n_clicks" == triggered and force_clicks:
+        if triggered == "sync-force-btn.n_clicks" and force_clicks:
             force = True
-        elif "sync-smart-btn.n_clicks" == triggered and smart_clicks:
+        elif triggered == "sync-smart-btn.n_clicks" and smart_clicks:
             force = False
         else:
             force = None
@@ -1630,11 +1340,15 @@ def register_all_callbacks(dash_app):
                 resp = _api_post(f"/api/sync/all?force={force_str}", timeout=10)
                 if resp is None:
                     return {}, [html.Small("Network error", style={"color": ACCENT_LOSS})], "", True, dash.no_update
-                if not resp.ok:
-                    return {}, [html.Small(f"Error: {resp.status_code}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
-                data = resp.json()
+                data = resp
                 job_id = data.get("job_id")
-                return {"job_id": job_id, "status": "pending", "force": force}, [html.Small(f"{label} sync started...", style={"color": TEXT_SECONDARY})], "", False, dash.no_update
+                return (
+                    {"job_id": job_id, "status": "pending", "force": force},
+                    [html.Small(f"{label} sync started...", style={"color": TEXT_SECONDARY})],
+                    "",
+                    False,
+                    dash.no_update,
+                )
             except Exception as e:
                 return {}, [html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
 
@@ -1664,8 +1378,9 @@ def register_all_callbacks(dash_app):
             error = status_data.get("error")
 
             # Build progress list
+            step_names = ["IBKR Flex", "Stock Prices", "Earnings Dates"]
             progress_cards = []
-            for i in range(1, 5):
+            for i in range(1, 4):
                 if i in completed:
                     badge = dbc.Badge("✓", color="success")
                 elif i == current_step and status in ("running", "syncing"):
@@ -1677,10 +1392,9 @@ def register_all_callbacks(dash_app):
                 else:
                     badge = dbc.Badge("Pending", color="secondary")
 
-                step_names = ["IBKR Flex", "Stock Prices", "Earnings Dates", "Screener Options"]
                 progress_cards.append(
                     html.Div(
-                        [html.Span(step_names[i-1], style={"color": TEXT_PRIMARY}), badge],
+                        [html.Span(step_names[i - 1], style={"color": TEXT_PRIMARY}), badge],
                         style={"marginRight": "1rem"},
                     )
                 )
@@ -1693,96 +1407,19 @@ def register_all_callbacks(dash_app):
                 return status_data, progress_list, last_time, True, dash.no_update
 
             if status == "error":
-                return status_data, [html.Small(f"Error at step {current_step}: {error}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
+                return (
+                    status_data,
+                    [html.Small(f"Error at step {current_step}: {error}", style={"color": ACCENT_LOSS})],
+                    "",
+                    True,
+                    dash.no_update,
+                )
 
             # Still running
             return status_data, progress_list, "", False, dash.no_update
 
         except Exception as e:
             return store_data, [html.Small(f"Poll error: {e}", style={"color": ACCENT_LOSS})], "", True, dash.no_update
-
-    # ---- Watchlist Management (moved to Settings) ----
-    @dash_app.callback(
-        Output("screener-watchlist-store", "data"),
-        Output("settings-watchlist-tags", "children"),
-        Output("settings-add-symbol-status", "children"),
-        Input("settings-add-symbol-btn", "n_clicks"),
-        Input({"type": "settings-remove-symbol-btn", "index": dash.dependencies.ALL}, "n_clicks"),
-        State("settings-add-symbol-input", "value"),
-        prevent_initial_call=True,
-    )
-    def manage_settings_watchlist(add_clicks, remove_clicks, new_symbol):
-        """Manage watchlist from Settings tab."""
-        ctx = dash.callback_context
-        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-
-        status_msg = ""
-
-        # Remove symbol
-        if "settings-remove-symbol-btn" in triggered:
-            triggered_id = dash.callback_context.triggered_id
-            if isinstance(triggered_id, dict) and triggered_id.get("type") == "settings-remove-symbol-btn":
-                sym = triggered_id["index"]
-                try:
-                    _api_delete(f"/api/screener/watchlist/{sym}")
-                    status_msg = f"Removed {sym}"
-                except Exception as e:
-                    status_msg = f"Failed: {e}"
-
-        # Add symbol
-        elif "settings-add-symbol-btn" in triggered and add_clicks and new_symbol:
-            symbol_upper = new_symbol.strip().upper()
-            if not symbol_upper:
-                status_msg = "Enter a symbol"
-            else:
-                try:
-                    resp = _api_post("/api/screener/watchlist", json={"symbol": symbol_upper})
-                    if resp and resp.ok:
-                        status_msg = f"Added {symbol_upper}"
-                    elif resp:
-                        detail = resp.json().get("detail", resp.text[:50])
-                        status_msg = detail
-                    else:
-                        status_msg = "Network error"
-                except Exception as e:
-                    status_msg = f"Failed: {e}"
-
-        # Fetch current watchlist
-        data = _api_get("/api/screener/watchlist")
-        symbols = data.get("symbols", []) if data else []
-
-        # Build tags for settings tab
-        tags = []
-        for sym in symbols:
-            tags.append(
-                html.Span(
-                    [
-                        html.Span(sym, style={"marginRight": "0.3rem"}),
-                        html.Span(
-                            "x",
-                            id={"type": "settings-remove-symbol-btn", "index": sym},
-                            style={
-                                "cursor": "pointer",
-                                "fontWeight": 700,
-                                "fontSize": "0.7rem",
-                                "color": TEXT_SECONDARY,
-                            },
-                        ),
-                    ],
-                    style={
-                        "backgroundColor": BG_CARD_HEADER,
-                        "border": f"1px solid {BORDER}",
-                        "borderRadius": "4px",
-                        "padding": "0.2rem 0.5rem",
-                        "fontSize": "0.8rem",
-                        "color": TEXT_PRIMARY,
-                        "marginRight": "0.4rem",
-                        "display": "inline-block",
-                    },
-                )
-            )
-
-        return symbols, tags, status_msg
 
     # ---- Account Sync Status ----
     @dash_app.callback(
@@ -1800,7 +1437,11 @@ def register_all_callbacks(dash_app):
         # Only trigger on sync completion (skip intermediate states)
         ctx = dash.callback_context
         triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-        if triggered == "sync-status-store.data" and sync_data and sync_data.get("status") not in ("completed", "error"):
+        if (
+            triggered == "sync-status-store.data"
+            and sync_data
+            and sync_data.get("status") not in ("completed", "error")
+        ):
             return dash.no_update
 
         try:
@@ -1830,10 +1471,28 @@ def register_all_callbacks(dash_app):
                 rows.append(
                     html.Div(
                         [
-                            html.Span(acct["name"], style={"color": TEXT_PRIMARY, "fontWeight": 600, "width": "25%", "display": "inline-block"}),
-                            html.Span(f"{pos_count} pos", style={"color": pos_color, "fontSize": "0.8rem", "width": "15%", "display": "inline-block"}),
+                            html.Span(
+                                acct["name"],
+                                style={
+                                    "color": TEXT_PRIMARY,
+                                    "fontWeight": 600,
+                                    "width": "25%",
+                                    "display": "inline-block",
+                                },
+                            ),
+                            html.Span(
+                                f"{pos_count} pos",
+                                style={
+                                    "color": pos_color,
+                                    "fontSize": "0.8rem",
+                                    "width": "15%",
+                                    "display": "inline-block",
+                                },
+                            ),
                             enabled_badge,
-                            html.Span("Flex: ", style={"color": TEXT_SECONDARY, "fontSize": "0.75rem", "marginLeft": "1rem"}),
+                            html.Span(
+                                "Flex: ", style={"color": TEXT_SECONDARY, "fontSize": "0.75rem", "marginLeft": "1rem"}
+                            ),
                             flex_display,
                         ],
                         style={
@@ -1864,7 +1523,11 @@ def register_all_callbacks(dash_app):
         # Only trigger on sync completion (skip intermediate states)
         ctx = dash.callback_context
         triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-        if triggered == "sync-status-store.data" and sync_data and sync_data.get("status") not in ("completed", "error"):
+        if (
+            triggered == "sync-status-store.data"
+            and sync_data
+            and sync_data.get("status") not in ("completed", "error")
+        ):
             return dash.no_update
 
         try:
@@ -1878,10 +1541,50 @@ def register_all_callbacks(dash_app):
 
             header = html.Div(
                 [
-                    html.Span("Symbol", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "20%", "display": "inline-block", "fontWeight": 600}),
-                    html.Span("Price", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "20%", "display": "inline-block", "fontWeight": 600}),
-                    html.Span("Options", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "15%", "display": "inline-block", "fontWeight": 600}),
-                    html.Span("Last Update", style={"color": TEXT_SECONDARY, "fontSize": "0.7rem", "textTransform": "uppercase", "width": "25%", "display": "inline-block", "fontWeight": 600}),
+                    html.Span(
+                        "Symbol",
+                        style={
+                            "color": TEXT_SECONDARY,
+                            "fontSize": "0.7rem",
+                            "textTransform": "uppercase",
+                            "width": "20%",
+                            "display": "inline-block",
+                            "fontWeight": 600,
+                        },
+                    ),
+                    html.Span(
+                        "Price",
+                        style={
+                            "color": TEXT_SECONDARY,
+                            "fontSize": "0.7rem",
+                            "textTransform": "uppercase",
+                            "width": "20%",
+                            "display": "inline-block",
+                            "fontWeight": 600,
+                        },
+                    ),
+                    html.Span(
+                        "Options",
+                        style={
+                            "color": TEXT_SECONDARY,
+                            "fontSize": "0.7rem",
+                            "textTransform": "uppercase",
+                            "width": "15%",
+                            "display": "inline-block",
+                            "fontWeight": 600,
+                        },
+                    ),
+                    html.Span(
+                        "Last Update",
+                        style={
+                            "color": TEXT_SECONDARY,
+                            "fontSize": "0.7rem",
+                            "textTransform": "uppercase",
+                            "width": "25%",
+                            "display": "inline-block",
+                            "fontWeight": 600,
+                        },
+                    ),
                 ],
                 style={
                     "paddingBottom": "0.5rem",
@@ -1901,7 +1604,11 @@ def register_all_callbacks(dash_app):
 
                 if last_updated:
                     age = _format_age(last_updated)
-                    age_color = ACCENT_PROFIT if "just now" in age or "h ago" in age and int(age.split("h")[0]) < 24 else ACCENT_WARN
+                    age_color = (
+                        ACCENT_PROFIT
+                        if "just now" in age or "h ago" in age and int(age.split("h")[0]) < 24
+                        else ACCENT_WARN
+                    )
                 else:
                     age = "Never"
                     age_color = ACCENT_LOSS
@@ -1909,10 +1616,42 @@ def register_all_callbacks(dash_app):
                 rows.append(
                     html.Div(
                         [
-                            html.Span(sym["symbol"], style={"color": TEXT_PRIMARY, "fontWeight": 600, "width": "20%", "display": "inline-block"}),
-                            html.Span(price_str, style={"color": price_color, "fontSize": "0.85rem", "width": "20%", "display": "inline-block"}),
-                            html.Span(str(opt_count), style={"color": TEXT_SECONDARY, "fontSize": "0.85rem", "width": "15%", "display": "inline-block"}),
-                            html.Span(age, style={"color": age_color, "fontSize": "0.75rem", "width": "25%", "display": "inline-block"}),
+                            html.Span(
+                                sym["symbol"],
+                                style={
+                                    "color": TEXT_PRIMARY,
+                                    "fontWeight": 600,
+                                    "width": "20%",
+                                    "display": "inline-block",
+                                },
+                            ),
+                            html.Span(
+                                price_str,
+                                style={
+                                    "color": price_color,
+                                    "fontSize": "0.85rem",
+                                    "width": "20%",
+                                    "display": "inline-block",
+                                },
+                            ),
+                            html.Span(
+                                str(opt_count),
+                                style={
+                                    "color": TEXT_SECONDARY,
+                                    "fontSize": "0.85rem",
+                                    "width": "15%",
+                                    "display": "inline-block",
+                                },
+                            ),
+                            html.Span(
+                                age,
+                                style={
+                                    "color": age_color,
+                                    "fontSize": "0.75rem",
+                                    "width": "25%",
+                                    "display": "inline-block",
+                                },
+                            ),
                         ],
                         style={
                             "padding": "0.5rem 0",
@@ -1935,111 +1674,12 @@ def register_all_callbacks(dash_app):
         except Exception as e:
             return html.Small(f"Error: {e}", style={"color": ACCENT_LOSS})
 
-    # ---- Screener Cache Reader & Manual Scan Trigger ----
-    @dash_app.callback(
-        Output("screener-results-store", "data"),
-        Output("screener-data-age", "children"),
-        Output("screener-summary-cards", "children"),
-        Output("screener-scan-status", "children"),
-        Input("main-tabs", "active_tab"),
-        Input("screener-scan-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def load_screener_cache(active_tab, scan_clicks):
-        """Load screener results from DB cache or trigger a new scan."""
-        if active_tab != "suggestions":
-            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-
-        ctx = dash.callback_context
-        triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
-        is_scan_triggered = triggered == "screener-scan-btn.n_clicks" and scan_clicks
-
-        # If scan button clicked, start the scan
-        if is_scan_triggered:
-            try:
-                resp = _api_post("/api/screener/scan", timeout=10)
-                job_id = resp.get("job_id")
-                if not job_id:
-                    return dash.no_update, dash.no_update, dash.no_update, "Failed to start scan"
-            except Exception as e:
-                return dash.no_update, dash.no_update, dash.no_update, f"Error: {e}"
-
-            # Poll for completion (max 60 iterations = 5 minutes)
-            import time
-            for _ in range(60):
-                time.sleep(5)
-                try:
-                    status = _api_get(f"/api/screener/scan/{job_id}", timeout=10)
-                    if status.get("status") == "completed":
-                        break
-                    if status.get("status") == "failed":
-                        return dash.no_update, dash.no_update, dash.no_update, "Scan failed"
-                except Exception:
-                    pass
-
-            # Scan complete - fall through to reload results
-
-        # Load results from cache
-        try:
-            data = _api_get("/api/screener/results", timeout=10)
-            if not data:
-                return (
-                    {},
-                    "No cached data",
-                    html.Small(
-                        ["Click ", html.Strong("Run Scan"), " to start a fresh scan"],
-                        style={"color": TEXT_SECONDARY},
-                    ),
-                    "",
-                )
-
-            results = data.get("results", [])
-            if not results:
-                return {}, "No data", html.Small("No opportunities found", style={"color": TEXT_SECONDARY}), ""
-
-            # Build summary cards
-            total_capital = sum(r.get("capital_required", 0) for r in results)
-            avg_iv = sum(r.get("iv", 0) for r in results) / len(results) if results else 0
-            scanned_at = results[0].get("scanned_at", "") if results else ""
-            watchlist_count = len(set(r.get("symbol") for r in results))
-
-            scan_data = {
-                "results": results,
-                "watchlist_count": watchlist_count,
-                "opportunities_found": len(results),
-                "avg_iv": avg_iv,
-                "total_capital": total_capital,
-                "scanned_at": scanned_at,
-            }
-
-            age_str = ""
-            if scanned_at:
-                age_str = f"({_format_age(scanned_at)})"
-
-            summary = dbc.Row(
-                [
-                    dbc.Col(kpi_card("Watchlist", str(watchlist_count), ACCENT_INFO), lg=2, sm=6),
-                    dbc.Col(kpi_card("Opportunities", str(len(results)), ACCENT_PROFIT), lg=2, sm=6),
-                    dbc.Col(kpi_card("Avg IV", f"{avg_iv * 100:.1f}%", ACCENT_WARN), lg=2, sm=6),
-                    dbc.Col(kpi_card("Total Capital", fmt_money(total_capital), ACCENT_PROFIT), lg=2, sm=6),
-                    dbc.Col(
-                        kpi_card("Scanned", scanned_at[:19].replace("T", " "), TEXT_SECONDARY),
-                        lg=4,
-                        sm=6,
-                    ),
-                ]
-            )
-
-            return scan_data, age_str, summary, ""
-
-        except Exception as e:
-            return {}, f"Error: {e}", html.Small(str(e), style={"color": ACCENT_LOSS}), ""
-
 
 def _format_age(ts_str: str) -> str:
     """Format timestamp as human-readable age."""
     try:
         from datetime import datetime
+
         ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
         diff = now - ts
@@ -2060,6 +1700,7 @@ def _get_age_hours(ts_str: str) -> int:
     """Get age in hours from timestamp."""
     try:
         from datetime import datetime
+
         ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
         now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
         diff = now - ts
