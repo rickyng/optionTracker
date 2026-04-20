@@ -12,4 +12,11 @@ build/
 htmlcov/
 .coverage
 downloads/
-.claude/worktrees/
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb

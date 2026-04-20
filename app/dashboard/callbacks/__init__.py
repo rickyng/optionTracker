@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 import dash
 import dash_bootstrap_components as dbc
@@ -738,10 +738,10 @@ def register_all_callbacks(dash_app):
 
     # ---- Expiration callbacks ----
     @dash_app.callback(
-        Output("expiry-lt7", "children"),
-        Output("expiry-7to14", "children"),
-        Output("expiry-14to21", "children"),
-        Output("expiry-gt21", "children"),
+        Output("expiry-this-week", "children"),
+        Output("expiry-next-week", "children"),
+        Output("expiry-next-next-week", "children"),
+        Output("expiry-beyond", "children"),
         Input("positions-store", "data"),
         Input("main-tabs", "active_tab"),
     )
@@ -776,9 +776,7 @@ def register_all_callbacks(dash_app):
             # For short puts: ITM when price < strike (obligated to buy at higher strike)
             # For short calls: ITM when price > strike (obligated to sell at lower strike)
             if right == "P":
-                # Short put
                 if price < strike:
-                    # ITM - stock below strike
                     otm_pct = ((strike - price) / price) * 100
                     if otm_pct <= 5:
                         return "ITM", ACCENT_PROFIT
@@ -787,7 +785,6 @@ def register_all_callbacks(dash_app):
                     else:
                         return "10% ITM", ACCENT_LOSS
                 else:
-                    # OTM - stock above strike
                     otm_pct = ((price - strike) / price) * 100
                     if otm_pct <= 5:
                         return "ATM", TEXT_SECONDARY
@@ -796,9 +793,7 @@ def register_all_callbacks(dash_app):
                     else:
                         return "10% OTM", ACCENT_LOSS
             else:
-                # Short call (right == "C")
                 if price > strike:
-                    # ITM - stock above strike
                     otm_pct = ((price - strike) / price) * 100
                     if otm_pct <= 5:
                         return "ITM", ACCENT_PROFIT
@@ -807,7 +802,6 @@ def register_all_callbacks(dash_app):
                     else:
                         return "10% ITM", ACCENT_LOSS
                 else:
-                    # OTM - stock below strike
                     otm_pct = ((strike - price) / price) * 100
                     if otm_pct <= 5:
                         return "ATM", TEXT_SECONDARY
@@ -816,17 +810,30 @@ def register_all_callbacks(dash_app):
                     else:
                         return "10% OTM", ACCENT_LOSS
 
-        # Group positions by DTE bucket and moneyness
+        # Calendar week boundaries (week starts Monday)
+        today = date.today()
+        days_until_sunday = 6 - today.weekday()
+        end_this_week = today + timedelta(days=days_until_sunday)
+        end_next_week = end_this_week + timedelta(days=7)
+        end_next_next_week = end_next_week + timedelta(days=7)
+
+        # Group positions by calendar-week bucket and moneyness
         buckets = {
-            "lt7": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
-            "w7to14": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
-            "w14to21": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
-            "gt21": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+            "this_week": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+            "next_week": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+            "next_next_week": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
+            "beyond": {"ITM": [], "5% OTM": [], "10% OTM": [], "N/A": []},
         }
 
         for p in positions:
             try:
-                dte = p.get("days_to_expiry", 999)
+                expiry_str = p.get("expiry", "")
+                if not expiry_str:
+                    continue
+                expiry = date.fromisoformat(expiry_str)
+                if expiry < today:
+                    continue
+                dte = (expiry - today).days
                 moneyness, moneyness_color = calc_moneyness(p)
 
                 # Normalize moneyness to bucket key
@@ -873,24 +880,23 @@ def register_all_callbacks(dash_app):
                     className="mb-1",
                 )
 
-                # Assign to DTE bucket
-                if dte < 7:
-                    buckets["lt7"][bucket_key].append(item)
-                elif dte < 14:
-                    buckets["w7to14"][bucket_key].append(item)
-                elif dte < 21:
-                    buckets["w14to21"][bucket_key].append(item)
+                # Assign to calendar-week bucket
+                if expiry <= end_this_week:
+                    buckets["this_week"][bucket_key].append(item)
+                elif expiry <= end_next_week:
+                    buckets["next_week"][bucket_key].append(item)
+                elif expiry <= end_next_next_week:
+                    buckets["next_next_week"][bucket_key].append(item)
                 else:
-                    buckets["gt21"][bucket_key].append(item)
+                    buckets["beyond"][bucket_key].append(item)
             except (ValueError, KeyError):
                 pass
 
         def build_bucket_content(bucket_data: dict) -> list:
-            """Build grouped content for a DTE bucket with moneyness sub-headers."""
+            """Build grouped content for a week bucket with moneyness sub-headers."""
             total_count = sum(len(items) for items in bucket_data.values())
             content = [_count_badge([None] * total_count)]
 
-            # Order: ITM (highest risk) → 5% OTM → 10% OTM → N/A (unknown)
             order = [
                 ("ITM", ACCENT_PROFIT),
                 ("5% OTM", ACCENT_WARN),
@@ -903,7 +909,6 @@ def register_all_callbacks(dash_app):
                 if not items:
                     continue
 
-                # Sub-header for this moneyness group
                 sub_header = html.Div(
                     [
                         html.Span(
@@ -934,12 +939,12 @@ def register_all_callbacks(dash_app):
 
             return content
 
-        lt7_content = build_bucket_content(buckets["lt7"])
-        w7to14_content = build_bucket_content(buckets["w7to14"])
-        w14to21_content = build_bucket_content(buckets["w14to21"])
-        gt21_content = build_bucket_content(buckets["gt21"])
-
-        return lt7_content, w7to14_content, w14to21_content, gt21_content
+        return (
+            build_bucket_content(buckets["this_week"]),
+            build_bucket_content(buckets["next_week"]),
+            build_bucket_content(buckets["next_next_week"]),
+            build_bucket_content(buckets["beyond"]),
+        )
 
     # ---- Settings callbacks ----
 

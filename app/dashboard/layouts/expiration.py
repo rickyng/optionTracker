@@ -29,10 +29,10 @@ def expiration_layout():
                     dbc.Col(
                         [
                             _section_card(
-                                label="Critical",
-                                sublabel="< 7 days",
+                                label="This Week",
+                                sublabel="expires this week",
                                 accent=ACCENT_LOSS,
-                                body=html.Div(id="expiry-lt7"),
+                                body=html.Div(id="expiry-this-week"),
                             ),
                         ],
                         lg=3,
@@ -41,10 +41,10 @@ def expiration_layout():
                     dbc.Col(
                         [
                             _section_card(
-                                label="Near Term",
-                                sublabel="7–14 days",
+                                label="Next Week",
+                                sublabel="expires next week",
                                 accent=ACCENT_WARN,
-                                body=html.Div(id="expiry-7to14"),
+                                body=html.Div(id="expiry-next-week"),
                             ),
                         ],
                         lg=3,
@@ -53,10 +53,10 @@ def expiration_layout():
                     dbc.Col(
                         [
                             _section_card(
-                                label="Mid Term",
-                                sublabel="14–21 days",
+                                label="Next Next Week",
+                                sublabel="expires in 2 weeks",
                                 accent="#448aff",
-                                body=html.Div(id="expiry-14to21"),
+                                body=html.Div(id="expiry-next-next-week"),
                             ),
                         ],
                         lg=3,
@@ -65,10 +65,10 @@ def expiration_layout():
                     dbc.Col(
                         [
                             _section_card(
-                                label="Far Term",
-                                sublabel="> 21 days",
+                                label="Beyond",
+                                sublabel="expires later",
                                 accent=ACCENT_PROFIT,
-                                body=html.Div(id="expiry-gt21"),
+                                body=html.Div(id="expiry-beyond"),
                             ),
                         ],
                         lg=3,
